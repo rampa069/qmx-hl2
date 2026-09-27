@@ -1,4 +1,8 @@
-package probe
+// Package qmx speaks the QMX's Kenwood-style CAT dialect over its USB serial port.
+//
+// These helpers are synchronous and not safe for concurrent use on one port; callers serialise
+// access (the engine uses a single goroutine for CAT). A fuller client is tracked as QMX-dfb.3.
+package qmx
 
 import (
 	"fmt"
@@ -6,15 +10,14 @@ import (
 	"time"
 )
 
-// ReadWriter is the subset of serial.Port the probe needs. Read returns (0, nil) on timeout.
+// ReadWriter is the subset of serial.Port needed here. Read returns (0, nil) on timeout.
 type ReadWriter interface {
 	Read(p []byte) (int, error)
 	Write(p []byte) (int, error)
 }
 
 // Query sends a CAT command such as "VN;" and waits for the reply that starts with the same
-// two-letter prefix, skipping any unrelated ';'-terminated messages. It is a stopgap for the
-// probe; the real CAT client (QMX-dfb.3) replaces it.
+// two-letter prefix, skipping any unrelated ';'-terminated messages.
 func Query(rw ReadWriter, cmd string, timeout time.Duration) (string, error) {
 	if !strings.HasSuffix(cmd, ";") {
 		cmd += ";"

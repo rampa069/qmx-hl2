@@ -1,7 +1,7 @@
 // Command qmx-hl2 presents a QRP Labs QMX/QMX+ as a Hermes-Lite 2 (openHPSDR Protocol 1).
 //
-// So far the daemon answers discovery and start/stop only; RX/TX streaming is tracked in beads
-// epic QMX-dfb. -list and -probe are bench helpers.
+// The daemon streams QMX IQ to the client (RX only so far; TX is tracked in beads epic QMX-dfb).
+// -list and -probe are bench helpers.
 package main
 
 import (
@@ -18,9 +18,11 @@ import (
 
 	"github.com/rampa/qmx-hl2/internal/audio"
 	"github.com/rampa/qmx-hl2/internal/config"
+	"github.com/rampa/qmx-hl2/internal/engine"
 	"github.com/rampa/qmx-hl2/internal/hpsdr"
 	"github.com/rampa/qmx-hl2/internal/logging"
 	"github.com/rampa/qmx-hl2/internal/probe"
+	"github.com/rampa/qmx-hl2/internal/qmx"
 	"github.com/rampa/qmx-hl2/internal/serial"
 )
 
@@ -111,23 +113,23 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 	defer port.Close()
 
 	const catTimeout = 500 * time.Millisecond
-	if vn, err := probe.Query(port, "VN;", catTimeout); err == nil {
+	if vn, err := qmx.Query(port, "VN;", catTimeout); err == nil {
 		fmt.Println("firmware:", vn)
 	} else {
 		fmt.Println("firmware: unknown:", err)
 	}
-	origQ9, err := probe.Query(port, "Q9;", catTimeout)
+	origQ9, err := qmx.Query(port, "Q9;", catTimeout)
 	if err != nil {
 		return fmt.Errorf("read IQ mode: %w", err)
 	}
 	fmt.Println("IQ mode at start:", origQ9)
 
 	if cfg.ProbeIQMode && origQ9 != "Q91;" {
-		if err := probe.Send(port, "Q91;"); err != nil {
+		if err := qmx.Send(port, "Q91;"); err != nil {
 			return err
 		}
 		defer func() {
-			if err := probe.Send(port, origQ9); err != nil {
+			if err := qmx.Send(port, origQ9); err != nil {
 				slog.Warn("could not restore IQ mode", "want", origQ9, "err", err)
 			} else {
 				fmt.Println("IQ mode restored to", origQ9)
@@ -135,7 +137,7 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 		}()
 		// Q9 is volatile and some units ignore it, so read it back (doc/qmx/iq-mode.md).
 		time.Sleep(150 * time.Millisecond)
-		q9, err := probe.Query(port, "Q9;", catTimeout)
+		q9, err := qmx.Query(port, "Q9;", catTimeout)
 		if err != nil || q9 != "Q91;" {
 			return fmt.Errorf("IQ mode did not enable (reply %q, err %v)", q9, err)
 		}
@@ -259,21 +261,6 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-// logHandler is the protocol handler until the RX/TX pipelines exist (QMX-dfb.5/6).
-type logHandler struct{ ep2 int }
-
-func (h *logHandler) Started(addr netip.AddrPort, cmd hpsdr.StartStop) {
-	h.ep2 = 0
-	fmt.Printf("client %s started streaming (wideband=%v watchdog_disabled=%v); EP6 not implemented yet\n",
-		addr, cmd.Wideband, cmd.WatchdogDisable)
-}
-
-func (h *logHandler) Stopped(reason string) {
-	fmt.Printf("stream stopped: %s (%d EP2 packets)\n", reason, h.ep2)
-}
-
-func (h *logHandler) EP2([]byte) { h.ep2++ }
-
 func runDaemon(ctx context.Context, cfg *config.Config) error {
 	id := hpsdr.DefaultIdentity()
 	mac, err := hpsdr.ParseMAC(cfg.MAC)
@@ -281,13 +268,58 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("-mac: %w", err)
 	}
 	id.MAC = mac
-	srv, err := hpsdr.NewServer(id, &logHandler{}, cfg.Watchdog)
+
+	dev, err := serial.FindQMX(cfg.SerialPort)
+	if err != nil {
+		return err
+	}
+	port := serial.NewPort(serial.DefaultBaud)
+	if err := port.Open(dev); err != nil {
+		return err
+	}
+	defer port.Close()
+
+	be := audio.NewPABackend()
+	if err := be.Init(); err != nil {
+		return fmt.Errorf("init audio: %w", err)
+	}
+	defer be.Terminate()
+	capt, err := be.OpenCapture(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+	if err != nil {
+		return err
+	}
+	defer capt.Close()
+
+	ecfg := engine.DefaultConfig()
+	ecfg.SampleRate = cfg.SampleRate
+	ecfg.Frames = cfg.Frames
+	ecfg.RXGainDB = cfg.RXGainDB
+	ecfg.SwapIQ = cfg.SwapIQ
+
+	// The engine sends through the server's socket, and the server calls the engine.
+	var srv *hpsdr.Server
+	eng := engine.New(ecfg, port, capt, senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) }))
+	srv, err = hpsdr.NewServer(id, eng, cfg.Watchdog)
 	if err != nil {
 		return err
 	}
 	if err := srv.Listen(cfg.Listen); err != nil {
 		return err
 	}
-	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s); Ctrl-C to stop\n", srv.LocalAddr(), id.MAC)
-	return srv.Serve(ctx)
+	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s) with QMX on %s; Ctrl-C to stop\n", srv.LocalAddr(), id.MAC, dev)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Serve(ctx) }()
+	err = eng.Run(ctx)
+	cancel()
+	if serr := <-srvErr; err == nil {
+		err = serr
+	}
+	return err
 }
+
+type senderFunc func([]byte, netip.AddrPort) error
+
+func (f senderFunc) Send(p []byte, to netip.AddrPort) error { return f(p, to) }

@@ -25,6 +25,8 @@ type Config struct {
 	Listen   string        // UDP listen address, normally ":1024"
 	MAC      string        // MAC reported in discovery replies
 	Watchdog time.Duration // stop streaming after this long without EP2 packets
+	RXGainDB float64       // digital gain on QMX IQ
+	SwapIQ   bool          // swap I and Q if the spectrum appears mirrored
 
 	// One-shot modes.
 	List          bool          // list audio devices and serial ports, then exit
@@ -49,6 +51,8 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.StringVar(&c.Listen, "listen", ":1024", "UDP address for the emulated Hermes-Lite 2")
 	fs.StringVar(&c.MAC, "mac", "00:1c:c0:a2:51:4d", "MAC address reported in discovery replies")
 	fs.DurationVar(&c.Watchdog, "watchdog", 12*time.Second, "stop streaming after this long without packets from the client (0 disables)")
+	fs.Float64Var(&c.RXGainDB, "rxgain", 0, "digital gain in dB applied to the QMX IQ")
+	fs.BoolVar(&c.SwapIQ, "swapiq", false, "swap I and Q (if the spectrum appears mirrored)")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
 	fs.BoolVar(&c.ProbeIQMode, "iq", false, "with -probe: enable QMX IQ mode (Q91;) during the capture")

@@ -71,6 +71,12 @@ func (s *Server) LocalAddr() netip.AddrPort {
 // Conn returns the socket, for sending EP6 from the same port 1024 as a real HL2.
 func (s *Server) Conn() *net.UDPConn { return s.conn }
 
+// Send writes a packet to addr from the server's port 1024 socket, as a real HL2 does.
+func (s *Server) Send(pkt []byte, addr netip.AddrPort) error {
+	_, err := s.conn.WriteToUDPAddrPort(pkt, addr)
+	return err
+}
+
 // Client returns the streaming client, if any.
 func (s *Server) Client() (netip.AddrPort, bool) {
 	s.mu.Lock()
