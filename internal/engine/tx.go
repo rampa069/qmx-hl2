@@ -375,7 +375,15 @@ func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time) {
 		}
 	}
 	t.ssb.Reset()
-	t.ssb.Push(t.pending)
+	// Clients key MOX well before the audio (Zeus + an SSTV app: over a second of silence),
+	// and all of that was captured while classifying. Start the FIFO at its target with the
+	// most recent audio: pushing everything overflowed the FIFO and left 0.5 s of latency
+	// that the drift servo (max 1000 ppm) could not drain within an over (2026-09-27).
+	pre := t.pending
+	if max := t.ssb.target; len(pre) > max {
+		pre = pre[len(pre)-max:]
+	}
+	t.ssb.Push(pre)
 	t.ssb.Start()
 	t.pending = t.pending[:0]
 	t.voice = true

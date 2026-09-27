@@ -368,3 +368,32 @@ func TestSSBAudioResamplerIsClean(t *testing.T) {
 		t.Errorf("resampled sine SNR %.1f dB, want > 60", snr)
 	}
 }
+
+func TestTXSSBStartsAtTargetAfterLongSilence(t *testing.T) {
+	h := newHarness(t)
+	h.tx.ssb = newSSBAudio(48000)
+	h.send(true, 14230000, 0, 0, 1500*time.Millisecond) // MOX with silence
+	// Voice-like two-tone.
+	frames := int(0.2 * 48000 / hpsdr.SamplesPerEP2Frm)
+	for i := 0; i < frames; i++ {
+		var f txFrame
+		f.mox, f.txFreq = true, 14230000
+		for k := range f.iq {
+			h.phase += 1
+			tt := h.phase / 48000
+			i1 := 0.4*math.Cos(2*math.Pi*700*tt) + 0.4*math.Cos(2*math.Pi*1900*tt)
+			q1 := 0.4*math.Sin(2*math.Pi*700*tt) + 0.4*math.Sin(2*math.Pi*1900*tt)
+			f.iq[k] = [2]int16{int16(i1 * 32767), int16(q1 * 32767)}
+		}
+		h.tx.frame(context.Background(), f)
+	}
+	if !h.tx.voice {
+		t.Fatal("not in SSB")
+	}
+	h.tx.ssb.mu.Lock()
+	fill, disc := len(h.tx.ssb.fifo), h.tx.ssb.discarded
+	h.tx.ssb.mu.Unlock()
+	if disc != 0 || fill > h.tx.ssb.target+48000/5 {
+		t.Fatalf("FIFO fill %d (target %d), discarded %d", fill, h.tx.ssb.target, disc)
+	}
+}
