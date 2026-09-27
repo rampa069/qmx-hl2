@@ -1,9 +1,9 @@
 # QMX reference files
 
-Downloaded 2026-09-27. Original filenames kept. `.txt` files are `pdftotext -layout` extractions
-(or HTML-to-text for web pages) made locally for grepping.
+The QRP Labs documents used while writing `../*.md` are not copied into this repository. Read them
+at their sources (versions used: 2026-09-27).
 
-| File | Source URL | Content |
+| Document | Source URL | Content |
 |---|---|---|
 | cat_1_04_004.pdf / .txt | https://qrp-labs.com/images/qmx/manuals/cat_1_04_004.pdf | CAT programming manual rev 1_04_004 (23-Jul-2026), all QMX-series |
 | operation_1_04_004.pdf / .txt | https://qrp-labs.com/images/qmx/manuals/operation_1_04_004.pdf | Operating manual for firmware 1_04_004+ |

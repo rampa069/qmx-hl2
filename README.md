@@ -201,6 +201,5 @@ Third-party components:
   LGPL-2.1-or-later. The exact source used is the upstream `alsa-lib-1.2.12` release, which the
   `Makefile` downloads.
 
-The reference documents under `doc/*/ref` remain the property of their authors (QRP Labs, the
-Hermes-Lite project, TAPR/openHPSDR). They are included for convenience, with their sources
-listed in each `ref/README.md`.
+The reference documents behind `doc/` belong to their authors (QRP Labs, the Hermes-Lite
+project, TAPR/openHPSDR) and are linked, not copied, from each `doc/*/ref/README.md`.

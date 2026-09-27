@@ -1,5 +1,19 @@
 
-# Beads / Dolt files (added by bd init)
+# Local tooling (not part of the project)
+.beads/
+.agents/
+.claude/
+.codex/
+.cursor/
+AGENTS.md
+CLAUDE.md
+.gitignore.swp
+
+# Local copies of third-party reference documents (see doc/*/ref/README.md for links)
+doc/*/ref/*
+!doc/*/ref/README.md
+
+# Dolt
 .dolt/
 *.db
 .beads-credential-key
