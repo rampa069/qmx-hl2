@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"sync"
 
 	"github.com/rampa/qmx-hl2/internal/audio"
@@ -13,9 +14,8 @@ import (
 //
 // Samples arrive paced by the QMX capture clock (the client sends TX IQ in step with EP6), but
 // the QMX consumes playback at the host's USB clock; on the bench the two differ by about
-// 165 ppm. A FIFO with a fill-level target absorbs network jitter, and one sample is dropped or
-// repeated per chunk whenever the fill wanders outside a band around the target (the Quisk
-// approach).
+// 165 ppm. A FIFO with a fill-level target absorbs network jitter, and a fractional resampler
+// whose ratio is steered by the fill level absorbs the clock difference.
 //
 // Outside SSB overs the stream is paused: bench 2026-09-27 showed the QMX ignores CAT TA
 // tones (0 W) while USB audio is streaming, even silence.
@@ -24,10 +24,12 @@ type ssbAudio struct {
 	fifo    []float32
 	playing bool
 	target  int // samples buffered before playback starts, and the drift-control set point
-	band    int // allowed wander around target before correcting
 	max     int // hard cap; older samples are discarded beyond it
 
-	drops, dups, underruns int
+	underruns int
+	pos       float64 // fractional read position in fifo
+	ratio     float64 // input samples consumed per output sample
+	integ     float64 // PI integrator
 
 	active bool
 	wake   chan struct{}
@@ -36,7 +38,7 @@ type ssbAudio struct {
 func newSSBAudio(sampleRate int) *ssbAudio {
 	return &ssbAudio{
 		target: sampleRate * 60 / 1000, // 60 ms
-		band:   sampleRate * 20 / 1000,
+		ratio:  1,
 		max:    sampleRate / 2,
 		wake:   make(chan struct{}, 1),
 	}
@@ -86,42 +88,61 @@ func (a *ssbAudio) isActive() bool {
 	return a.active
 }
 
-// Stats returns the drift-correction and underrun counters.
-func (a *ssbAudio) Stats() (drops, dups, underruns int) {
+// Stats returns the underrun count and the estimated clock difference in ppm (the servo's
+// integral term, i.e. the long-term resampling ratio).
+func (a *ssbAudio) Stats() (underruns int, ppm float64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.drops, a.dups, a.underruns
+	return a.underruns, a.integ * 1e6
 }
 
-// fill copies the next len(out) samples (mono) into out, applying drift correction; silence
-// when not playing.
+// fill writes len(out) mono samples to out, resampling the FIFO by a ratio close to 1 that a
+// PI controller steers to hold the fill level at target. Cubic (Catmull-Rom) interpolation
+// keeps the tiny rate change inaudible, unlike dropping or repeating samples.
 func (a *ssbAudio) fill(out []float32) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.playing && len(a.fifo) >= a.target {
 		a.playing = true
+		a.pos = 1 // one sample of history for the interpolator
+		// The integrator is kept across overs: the clock difference does not change.
 	}
 	if !a.playing {
 		clear(out)
 		return
 	}
-	n := len(out)
-	switch f := len(a.fifo); {
-	case f > a.target+a.band && f > n:
-		a.fifo = a.fifo[1:] // drop one sample
-		a.drops++
-	case f < a.target-a.band && f > 0:
-		a.fifo = append([]float32{a.fifo[0]}, a.fifo...) // repeat one sample
-		a.dups++
+	// Controller: error in seconds of buffer, relative to the target.
+	e := float64(len(a.fifo)-a.target) / float64(a.target)
+	a.integ = math.Max(-maxPPM, math.Min(maxPPM, a.integ+ki*e))
+	a.ratio = 1 + math.Max(-maxPPM, math.Min(maxPPM, kp*e+a.integ))
+
+	for n := range out {
+		k := int(a.pos)
+		if k+2 >= len(a.fifo) {
+			clear(out[n:])
+			a.playing = false
+			a.underruns++
+			a.fifo = a.fifo[:0]
+			return
+		}
+		f := float32(a.pos - float64(k))
+		y0, y1, y2, y3 := a.fifo[k-1], a.fifo[k], a.fifo[k+1], a.fifo[k+2]
+		out[n] = y1 + 0.5*f*(y2-y0+f*(2*y0-5*y1+4*y2-y3+f*(3*(y1-y2)+y3-y0)))
+		a.pos += a.ratio
 	}
-	k := copy(out, a.fifo)
-	a.fifo = append(a.fifo[:0], a.fifo[k:]...)
-	if k < n {
-		clear(out[k:])
-		a.playing = false
-		a.underruns++
+	// Drop consumed samples, keeping one for history.
+	if k := int(a.pos) - 1; k > 0 {
+		a.fifo = append(a.fifo[:0], a.fifo[k:]...)
+		a.pos -= float64(k)
 	}
 }
+
+// Controller tuning: the ratio may deviate up to 1000 ppm (bench drift is ~165 ppm).
+const (
+	maxPPM = 1000e-6
+	kp     = 3000e-6 // ratio offset per unit of relative fill error (~20 s time constant)
+	ki     = 0.2e-6  // integrated each 5 ms chunk
+)
 
 // run writes to the playback stream until ctx ends. frames is the chunk size.
 func (a *ssbAudio) run(ctx context.Context, pb audio.PlaybackStream, frames int) {

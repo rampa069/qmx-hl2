@@ -466,6 +466,8 @@ func (t *transmitter) keyUp(reason string) {
 	t.keyed.Store(false)
 	if was == txOn {
 		if t.voice {
+			u, ppm := t.ssb.Stats()
+			slog.Info("SSB audio", "underruns", u, "drift_ppm", math.Round(ppm))
 			t.ssb.Stop()
 			if err := t.radio.RX(); err != nil {
 				slog.Error("TX: RX command failed", "err", err)

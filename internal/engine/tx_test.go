@@ -287,35 +287,84 @@ func TestTXAutoToneStaysTA(t *testing.T) {
 	}
 }
 
-func TestSSBAudioFIFO(t *testing.T) {
+func TestSSBAudioStartsAtTarget(t *testing.T) {
 	a := newSSBAudio(48000)
 	out := make([]float32, 240)
 	a.Push(make([]float32, 1000))
-	a.fill(out) // below the 60 ms target: silence, not playing
+	a.fill(out)
 	if a.playing {
 		t.Fatal("started before reaching target")
 	}
-	x := make([]float32, 3000) // inside the 60±20 ms band: no correction
-	for i := range x {
-		x[i] = float32(i)
-	}
-	a.Reset()
-	a.Push(x)
+	a.Push(make([]float32, 2000))
 	a.fill(out)
-	if !a.playing || out[0] != 0 || out[239] != 239 {
-		t.Fatalf("first chunk %v..%v playing=%v", out[0], out[239], a.playing)
+	if !a.playing {
+		t.Fatal("did not start at target")
 	}
-	// Overfilled: one sample dropped per chunk.
-	a.Push(make([]float32, 4000))
-	a.fill(out)
-	if d, _, _ := a.Stats(); d != 1 {
-		t.Fatalf("drops = %d", d)
-	}
-	// Drain to underrun.
-	for i := 0; i < 100; i++ {
+}
+
+// The producer runs 165 ppm fast with bursty delivery (like the bench QMX clocks and
+// network jitter); the controller must hold the fill near target without underruns.
+func TestSSBAudioDriftServo(t *testing.T) {
+	a := newSSBAudio(48000)
+	out := make([]float32, 240)
+	const inRate = 48000 * (1 + 165e-6)
+	var produced, phase float64
+	chunk := make([]float32, 0, 1024)
+	for step := 0; step < 200*120; step++ { // 120 s of 5 ms output chunks
+		// Producer: deliver what is due, in 126-sample packets, bursty every 20 ms.
+		if step%4 == 0 {
+			due := float64(step+4)*240*inRate/48000 - produced
+			chunk = chunk[:0]
+			for ; due >= 126; due -= 126 {
+				for k := 0; k < 126; k++ {
+					phase += 2 * math.Pi * 1000 / inRate
+					chunk = append(chunk, float32(0.5*math.Sin(phase)))
+				}
+				produced += 126
+			}
+			a.Push(chunk)
+		}
 		a.fill(out)
 	}
-	if _, _, u := a.Stats(); u != 1 || a.playing {
-		t.Fatalf("underruns=%d playing=%v", u, a.playing)
+	u, ppm := a.Stats()
+	if u != 0 {
+		t.Errorf("underruns = %d", u)
+	}
+	if math.Abs(ppm-165) > 40 {
+		t.Errorf("servo ratio %+.0f ppm, want about +165", ppm)
+	}
+	a.mu.Lock()
+	fill := len(a.fifo)
+	a.mu.Unlock()
+	if d := fill - a.target; d < -960 || d > 960 {
+		t.Errorf("fill %d samples, target %d", fill, a.target)
+	}
+}
+
+func TestSSBAudioResamplerIsClean(t *testing.T) {
+	a := newSSBAudio(48000)
+	x := make([]float32, 48000)
+	for i := range x {
+		x[i] = float32(0.5 * math.Sin(2*math.Pi*1000*float64(i)/48000))
+	}
+	a.Push(x)
+	out := make([]float32, 240)
+	var y []float32
+	for i := 0; i < 150; i++ {
+		a.fill(out)
+		y = append(y, out...)
+	}
+	// Fit the output to a 1 kHz sine (the ratio is within 1000 ppm of 1) and check the
+	// residual over a short stretch.
+	var errPow, sigPow float64
+	for i := 1000; i < 2000; i++ {
+		// Local reference: the ideal sine through neighbouring output samples.
+		ref := (y[i-1] + y[i+1]) / float32(2*math.Cos(2*math.Pi*1000/48000))
+		d := float64(y[i] - ref)
+		errPow += d * d
+		sigPow += float64(y[i]) * float64(y[i])
+	}
+	if snr := 10 * math.Log10(sigPow/errPow); snr < 60 {
+		t.Errorf("resampled sine SNR %.1f dB, want > 60", snr)
 	}
 }
