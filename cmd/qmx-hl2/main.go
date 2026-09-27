@@ -1,6 +1,7 @@
 // Command qmx-hl2 presents a QRP Labs QMX/QMX+ as a Hermes-Lite 2 (openHPSDR Protocol 1).
 //
-// The daemon streams QMX IQ to the client (RX only so far; TX is tracked in beads epic QMX-dfb).
+// The daemon streams QMX IQ to the client and, with -tx, transmits single-tone modes by
+// following the client's TX IQ with the QMX's CAT tone command.
 // -list and -probe are bench helpers.
 package main
 
@@ -295,6 +296,8 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.Frames = cfg.Frames
 	ecfg.RXGainDB = cfg.RXGainDB
 	ecfg.SwapIQ = cfg.SwapIQ
+	ecfg.TX.Enabled = cfg.TX
+	ecfg.TX.SwapIQ = cfg.TXSwapIQ
 
 	// The CAT client outlives the engine so the engine can restore the radio on exit.
 	cat := qmx.NewClient(port)
@@ -314,6 +317,11 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s) with QMX on %s; Ctrl-C to stop\n", srv.LocalAddr(), id.MAC, dev)
+	if cfg.TX {
+		fmt.Println("TX ENABLED: the QMX transmits when the client keys MOX (single-tone modes: FT8/FT4/WSPR/JS8/RTTY/CW)")
+	} else {
+		fmt.Println("receive only (start with -tx to allow transmitting)")
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

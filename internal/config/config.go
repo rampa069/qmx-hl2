@@ -27,6 +27,8 @@ type Config struct {
 	Watchdog time.Duration // stop streaming after this long without EP2 packets
 	RXGainDB float64       // digital gain on QMX IQ
 	SwapIQ   bool          // swap I and Q if the spectrum appears mirrored
+	TX       bool          // allow the QMX to transmit when the client keys MOX
+	TXSwapIQ bool          // swap the host's TX I and Q words
 
 	// One-shot modes.
 	List          bool          // list audio devices and serial ports, then exit
@@ -53,6 +55,8 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.DurationVar(&c.Watchdog, "watchdog", 12*time.Second, "stop streaming after this long without packets from the client (0 disables)")
 	fs.Float64Var(&c.RXGainDB, "rxgain", 0, "digital gain in dB applied to the QMX IQ")
 	fs.BoolVar(&c.SwapIQ, "swapiq", false, "swap I and Q (if the spectrum appears mirrored)")
+	fs.BoolVar(&c.TX, "tx", false, "enable transmit: key the QMX (Digi tone via CAT TA) when the client sends MOX")
+	fs.BoolVar(&c.TXSwapIQ, "txswapiq", false, "swap the client's TX I and Q (if transmitted tones come out mirrored)")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
 	fs.BoolVar(&c.ProbeIQMode, "iq", false, "with -probe: enable QMX IQ mode (Q91;) during the capture")

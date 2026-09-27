@@ -229,3 +229,83 @@ func TestEngineAck(t *testing.T) {
 		t.Fatalf("acks %+v", e.acks)
 	}
 }
+
+// ep2Tone builds a host packet whose frames carry MOX and a TX IQ tone at bb Hz.
+func ep2Tone(mox bool, bb float64, phase *float64) []byte {
+	c0 := byte(0x01 << 1) // TX frequency register, data unchanged below
+	if mox {
+		c0 |= 1
+	}
+	p := ep2([2]byte{c0, c0}, [2]uint32{14074000, 14074000})
+	for f := 0; f < 2; f++ {
+		for i := 0; i < 63; i++ {
+			*phase += 2 * math.Pi * bb / 48000
+			s := p[8+f*512+8+i*8:]
+			binary.BigEndian.PutUint16(s[4:], uint16(int16(16000*math.Cos(*phase))))
+			binary.BigEndian.PutUint16(s[6:], uint16(int16(16000*math.Sin(*phase))))
+		}
+	}
+	return p
+}
+
+func TestEngineTransmitsWithTA(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["QB"], cat.state["QC"] = "QB1;", "QC120;"
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	out := &capSender{}
+	e := New(cfg, client, &fakeCapture{frames: 240, toneHz: 3000}, out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{14074000, 0x04}))
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	waitFor(t, func() bool { return cat.get("FA") == "FA00014086000;" }, "RX tune")
+
+	// 300 ms of MOX with a 1500 Hz USB tone, paced like a real client.
+	var ph float64
+	for i := 0; i < 115; i++ {
+		e.EP2(ep2Tone(true, 1500, &ph))
+		time.Sleep(2625 * time.Microsecond)
+	}
+	waitFor(t, func() bool { return strings.HasPrefix(cat.get("TA"), "TA1500") }, "TA tone")
+	if cat.get("FA") != "FA00014074000;" {
+		t.Errorf("TX dial = %s, want 14074000", cat.get("FA"))
+	}
+	e.EP2(ep2Tone(false, 0, &ph))
+	waitFor(t, func() bool { return cat.get("TA") == "TA0;" }, "key-up")
+	waitFor(t, func() bool { return cat.get("FA") == "FA00014086000;" }, "RX retune after TX")
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	cat.mu.Lock()
+	log := strings.Join(cat.log, "")
+	cat.mu.Unlock()
+	for _, want := range []string{"QC3;", "QB1;", "TX;", "RX;", "QC120;"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("CAT log missing %q", want)
+		}
+	}
+	if strings.Index(log, "TX;") > strings.Index(log, "TA1500") {
+		t.Error("tone sent before TX")
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

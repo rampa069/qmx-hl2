@@ -2,7 +2,9 @@
 // the client as EP6 packets paced by the QMX capture clock, applies host register writes, and
 // keeps the QMX tuned so that its IQ window covers RX1.
 //
-// Transmit is not implemented yet: MOX from the host is ignored and the QMX is never keyed.
+// Transmit is optional (Config.TX.Enabled). When enabled, MOX-tagged TX IQ from the host is
+// reduced to a single tone whose frequency is sent to the QMX with CAT TA (see tx.go). When
+// disabled, MOX is ignored and the QMX is never keyed.
 package engine
 
 import (
@@ -35,11 +37,13 @@ type Config struct {
 	// SwapIQ exchanges the channels (use if the spectrum shows up mirrored). The bench and
 	// third-party code say left = I, but on-air orientation is not yet verified.
 	SwapIQ bool
+
+	TX TXConfig
 }
 
 // DefaultConfig returns bench-derived defaults.
 func DefaultConfig() Config {
-	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second}
+	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second, TX: DefaultTXConfig()}
 }
 
 // Sender transmits an EP6 packet to the client.
@@ -64,18 +68,40 @@ type Engine struct {
 	muteUntil time.Time // IQ is replaced with zeros until then
 	moxWarned bool
 
+	tx        *transmitter // nil when TX is disabled
+	txActive  bool         // QMX keyed: RX IQ is junk and retuning waits
+	txEndedAt time.Time
+	forceTune bool
+
 	tune chan struct{}
 }
 
 // New creates an engine. The capture stream must be open and delivering stereo IQ.
 func New(cfg Config, cat *qmx.Client, capt audio.CaptureStream, out Sender) *Engine {
-	return &Engine{
+	e := &Engine{
 		cfg:   cfg,
 		cat:   cat,
 		capt:  capt,
 		out:   out,
 		state: hpsdr.DefaultRadioState(),
 		tune:  make(chan struct{}, 1),
+	}
+	if cfg.TX.Enabled {
+		e.tx = newTransmitter(cfg.TX, cat, e.setTXActive)
+	}
+	return e
+}
+
+func (e *Engine) setTXActive(on bool) {
+	e.mu.Lock()
+	e.txActive = on
+	if !on {
+		e.txEndedAt = time.Now()
+		e.forceTune = true // the transmitter moved the dial
+	}
+	e.mu.Unlock()
+	if !on {
+		e.requestTune()
 	}
 }
 
@@ -124,9 +150,11 @@ func (e *Engine) EP2(pkt []byte) {
 		if f.CC.RQST {
 			e.acks = append(e.acks, f.CC)
 		}
-		if f.CC.MOX && !e.moxWarned {
+		if e.tx != nil {
+			e.tx.submit(txFrame{mox: f.CC.MOX, txFreq: e.state.TXFreq, iq: f.TXIQ})
+		} else if f.CC.MOX && !e.moxWarned {
 			e.moxWarned = true
-			slog.Warn("host requested TX (MOX); transmit is not implemented, ignoring")
+			slog.Warn("host requested TX (MOX); transmit is disabled (start with -tx), ignoring")
 		}
 	}
 	e.mu.Unlock()
@@ -157,6 +185,11 @@ func (e *Engine) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); e.catLoop(ctx) }()
+	if e.tx != nil {
+		// The transmitter keys up on shutdown before restore runs.
+		wg.Add(1)
+		go func() { defer wg.Done(); e.tx.run(ctx) }()
+	}
 	err = e.captureLoop(ctx)
 	cancel()
 	wg.Wait()
@@ -173,6 +206,23 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 		orig[c] = r
 	}
 	slog.Info("QMX state saved", "fa", orig["FA"], "md", orig["MD"], "q9", orig["Q9"])
+	keys := []string{"MD", "FA", "Q9"}
+	if e.tx != nil {
+		for _, c := range []string{"QB", "QC"} {
+			r, err := e.cat.Query(ctx, c+";")
+			if err != nil {
+				return nil, fmt.Errorf("read QMX %s: %w", c, err)
+			}
+			orig[c] = r
+		}
+		keys = append(keys, "QC", "QB")
+		// If the daemon dies mid-transmission, the QMX drops TX after 3 s without CAT.
+		if err := e.cat.SetCATTimeout(true, 3); err != nil {
+			return nil, err
+		}
+		e.cat.AllowTX(true)
+		slog.Warn("TX ENABLED: the QMX will transmit when the client keys MOX")
+	}
 	// Digi mode puts the LO exactly IFOffset below the dial (CW mode adds its own offset).
 	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {
 		return nil, err
@@ -181,7 +231,9 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 		return nil, err
 	}
 	return func() {
-		for _, c := range []string{"MD", "FA", "Q9"} {
+		_ = e.cat.RX()
+		e.cat.AllowTX(false)
+		for _, c := range keys {
 			if err := e.cat.Set(orig[c]); err != nil {
 				slog.Warn("restore failed", "cmd", orig[c], "err", err)
 			}
@@ -222,15 +274,26 @@ func (e *Engine) catLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-check.C:
+			e.mu.Lock()
+			busy := e.txActive
+			e.mu.Unlock()
+			if busy {
+				continue
+			}
 			if err := e.ensureIQMode(ctx); err != nil {
 				slog.Warn("IQ mode check failed", "err", err)
 			}
 		case <-e.tune:
 			e.mu.Lock()
 			rx1 := e.state.RX1Freq()
+			busy := e.txActive
+			if e.forceTune && !busy {
+				dial = 0
+				e.forceTune = false
+			}
 			e.mu.Unlock()
-			if rx1 == 0 {
-				continue
+			if rx1 == 0 || busy {
+				continue // after TX, setTXActive(false) requests a retune
 			}
 			want := rx1 + uint32(e.cfg.IFOffset)
 			if want == dial {
@@ -290,7 +353,9 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		lo := e.lo
 		acks := e.acks
 		e.acks = nil
-		mute := time.Now().Before(e.muteUntil)
+		now := time.Now()
+		mute := now.Before(e.muteUntil) || e.txActive || now.Sub(e.txEndedAt) < 100*time.Millisecond
+		transmitting := e.txActive
 		client = e.client
 		e.mu.Unlock()
 
@@ -352,7 +417,11 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 				builder.AddRound(round)
 			}
 		}
-		builder.SetTelemetry(hpsdr.Telemetry{Overload: overload})
+		tel := hpsdr.Telemetry{Overload: overload}
+		if transmitting {
+			tel.TXFIFO = 16 // a plausible ~10 ms of TX buffer, as a real HL2 would report
+		}
+		builder.SetTelemetry(tel)
 	}
 	return nil
 }
