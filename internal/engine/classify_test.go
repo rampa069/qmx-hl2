@@ -103,3 +103,26 @@ func TestClassifyVoiceLike(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyToneAfterLongSilence(t *testing.T) {
+	// Zeus + WSJT-X: MOX with 600 ms of silence, then an FT8 tone with a ~10 ms ramp.
+	g := func(i int) complex128 {
+		const start = 28800
+		if i < start {
+			return 0
+		}
+		a := math.Min(1, float64(i-start)/480)
+		return complex(a, 0) * tone(1518.75)(i)
+	}
+	c := newClassifier(0.01)
+	for i := 0; i < 48000; i++ {
+		c.add(g(i))
+		if k := c.decide(); k != txUndecided {
+			if k != txTone {
+				t.Fatalf("got %v at sample %d, want tone", k, i)
+			}
+			return
+		}
+	}
+	t.Fatal("undecided")
+}

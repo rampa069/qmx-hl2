@@ -325,9 +325,11 @@ func (e *Engine) catLoop(ctx context.Context) {
 			e.mu.Lock()
 			rx1 := e.state.RX1Freq()
 			busy := e.txActive
+			verify := false
 			if e.forceTune && !busy {
 				dial = 0
 				e.forceTune = false
+				verify = true
 			}
 			e.mu.Unlock()
 			if rx1 == 0 || busy {
@@ -346,10 +348,34 @@ func (e *Engine) catLoop(ctx context.Context) {
 			e.lo = float64(rx1)
 			e.mu.Unlock()
 			slog.Debug("tuned", "rx1", rx1, "dial", want)
+			if verify {
+				// After TX the transmitter changed the dial (and for SSB the mode); make sure
+				// the QMX really is back in Digi mode on the RX dial.
+				e.verifyRX(ctx, want)
+			}
 			// Coalesce bursts of tuning (a client dragging the VFO) to about 20 retunes/s.
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+}
+
+// verifyRX reads back the QMX mode and dial after a transmission and corrects them.
+func (e *Engine) verifyRX(ctx context.Context, want uint32) {
+	time.Sleep(100 * time.Millisecond)
+	md, err1 := e.cat.Mode(ctx)
+	fa, err2 := e.cat.FreqA(ctx)
+	if err1 != nil || err2 != nil {
+		slog.Warn("RX verify: CAT read failed", "mode_err", err1, "freq_err", err2)
+		return
+	}
+	if md == qmx.ModeDigi && fa == want {
+		slog.Debug("RX verify ok", "mode", md, "dial", fa)
+		return
+	}
+	slog.Warn("QMX not back on the RX setting after TX; correcting", "mode", md, "dial", fa, "want_dial", want)
+	_ = e.cat.SetMode(qmx.ModeDigi)
+	time.Sleep(50 * time.Millisecond)
+	_ = e.cat.SetFreqA(want)
 }
 
 // captureLoop reads QMX IQ, converts it to the host's rate and receivers, and sends EP6.
