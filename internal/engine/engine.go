@@ -50,7 +50,7 @@ type Sender interface {
 // Engine implements hpsdr.Handler.
 type Engine struct {
 	cfg  Config
-	cat  qmx.ReadWriter
+	cat  *qmx.Client
 	capt audio.CaptureStream
 	out  Sender
 
@@ -68,7 +68,7 @@ type Engine struct {
 }
 
 // New creates an engine. The capture stream must be open and delivering stereo IQ.
-func New(cfg Config, cat qmx.ReadWriter, capt audio.CaptureStream, out Sender) *Engine {
+func New(cfg Config, cat *qmx.Client, capt audio.CaptureStream, out Sender) *Engine {
 	return &Engine{
 		cfg:   cfg,
 		cat:   cat,
@@ -143,9 +143,10 @@ func (e *Engine) requestTune() {
 }
 
 // Run enables IQ mode, then runs the CAT and capture loops until ctx ends. It restores the
-// QMX's IQ mode, operating mode and frequency on return.
+// QMX's IQ mode, operating mode and frequency on return, so the CAT client's Run must keep
+// going until this returns.
 func (e *Engine) Run(ctx context.Context) error {
-	restore, err := e.setupRadio()
+	restore, err := e.setupRadio(ctx)
 	if err != nil {
 		return err
 	}
@@ -162,11 +163,10 @@ func (e *Engine) Run(ctx context.Context) error {
 	return err
 }
 
-func (e *Engine) setupRadio() (restore func(), err error) {
-	const t = 500 * time.Millisecond
+func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 	orig := map[string]string{}
 	for _, c := range []string{"FA", "MD", "Q9"} {
-		r, err := qmx.Query(e.cat, c+";", t)
+		r, err := e.cat.Query(ctx, c+";")
 		if err != nil {
 			return nil, fmt.Errorf("read QMX %s: %w", c, err)
 		}
@@ -174,15 +174,15 @@ func (e *Engine) setupRadio() (restore func(), err error) {
 	}
 	slog.Info("QMX state saved", "fa", orig["FA"], "md", orig["MD"], "q9", orig["Q9"])
 	// Digi mode puts the LO exactly IFOffset below the dial (CW mode adds its own offset).
-	if err := qmx.Send(e.cat, "MD6;"); err != nil {
+	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {
 		return nil, err
 	}
-	if err := e.ensureIQMode(); err != nil {
+	if err := e.ensureIQMode(ctx); err != nil {
 		return nil, err
 	}
 	return func() {
 		for _, c := range []string{"MD", "FA", "Q9"} {
-			if err := qmx.Send(e.cat, orig[c]); err != nil {
+			if err := e.cat.Set(orig[c]); err != nil {
 				slog.Warn("restore failed", "cmd", orig[c], "err", err)
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -192,21 +192,21 @@ func (e *Engine) setupRadio() (restore func(), err error) {
 }
 
 // ensureIQMode sets Q91 and verifies it; Q9 is volatile on the QMX (doc/qmx/iq-mode.md).
-func (e *Engine) ensureIQMode() error {
-	r, err := qmx.Query(e.cat, "Q9;", 500*time.Millisecond)
-	if err == nil && r == "Q91;" {
+func (e *Engine) ensureIQMode(ctx context.Context) error {
+	on, err := e.cat.IQMode(ctx)
+	if err == nil && on {
 		return nil
 	}
-	if err := qmx.Send(e.cat, "Q91;"); err != nil {
+	if err := e.cat.SetIQMode(true); err != nil {
 		return err
 	}
 	e.mu.Lock()
 	e.muteUntil = time.Now().Add(e.cfg.IQSettle)
 	e.mu.Unlock()
 	time.Sleep(150 * time.Millisecond)
-	r, err = qmx.Query(e.cat, "Q9;", 500*time.Millisecond)
-	if err != nil || r != "Q91;" {
-		return fmt.Errorf("QMX did not enter IQ mode (reply %q, err %v)", r, err)
+	on, err = e.cat.IQMode(ctx)
+	if err != nil || !on {
+		return fmt.Errorf("QMX did not enter IQ mode (on=%v, err %v)", on, err)
 	}
 	slog.Info("QMX IQ mode enabled")
 	return nil
@@ -222,7 +222,7 @@ func (e *Engine) catLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-check.C:
-			if err := e.ensureIQMode(); err != nil {
+			if err := e.ensureIQMode(ctx); err != nil {
 				slog.Warn("IQ mode check failed", "err", err)
 			}
 		case <-e.tune:
@@ -236,7 +236,7 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if want == dial {
 				continue
 			}
-			if err := qmx.Send(e.cat, fmt.Sprintf("FA%011d;", want)); err != nil {
+			if err := e.cat.SetFreqA(want); err != nil {
 				slog.Warn("tune failed", "err", err)
 				continue
 			}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rampa/qmx-hl2/internal/hpsdr"
+	"github.com/rampa/qmx-hl2/internal/qmx"
 )
 
 // fakeCAT emulates the few QMX CAT commands the engine uses.
@@ -155,7 +156,11 @@ func TestEngineStreamsShiftedReceivers(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IQSettle = 0
 	cfg.DCCornerHz = 0
-	e := New(cfg, cat, capt, out)
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, capt, out)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
@@ -164,8 +169,8 @@ func TestEngineStreamsShiftedReceivers(t *testing.T) {
 	// Priming: 192 kHz, 2 receivers, duplex; RX1 14.074 MHz, RX2 14.076 MHz.
 	e.EP2(ep2([2]byte{0x00, 0x02 << 1}, [2]uint32{0x02<<24 | 1<<3 | 0x04, 14074000}))
 	e.EP2(ep2([2]byte{0x03 << 1, 0x80 | 0x3a<<1}, [2]uint32{14076000, 0x1}))
-	client := netip.MustParseAddrPort("192.0.2.1:50000")
-	e.Started(client, hpsdr.StartStop{IQ: true})
+	peer := netip.MustParseAddrPort("192.0.2.1:50000")
+	e.Started(peer, hpsdr.StartStop{IQ: true})
 
 	deadline := time.Now().Add(3 * time.Second)
 	for cat.get("FA") != "FA00014086000;" {
@@ -190,7 +195,7 @@ func TestEngineStreamsShiftedReceivers(t *testing.T) {
 	if len(pkts) < 700 || len(pkts) > 1400 {
 		t.Errorf("got %d packets in 0.4 s, want about 1067", len(pkts))
 	}
-	if out.to != client {
+	if out.to != peer {
 		t.Errorf("sent to %v", out.to)
 	}
 	// The QMX tone at IQ +3000 Hz is RF 14.077 MHz: +3000 Hz for RX1 and +1000 Hz for RX2.
@@ -218,7 +223,7 @@ func TestEngineStreamsShiftedReceivers(t *testing.T) {
 }
 
 func TestEngineAck(t *testing.T) {
-	e := New(DefaultConfig(), newFakeCAT(), &fakeCapture{frames: 240}, &capSender{})
+	e := New(DefaultConfig(), qmx.NewClient(newFakeCAT()), &fakeCapture{frames: 240}, &capSender{})
 	e.EP2(ep2([2]byte{0x80 | 0x3a<<1, 0}, [2]uint32{0x1, 0}))
 	if len(e.acks) != 1 || e.acks[0].Addr != 0x3a {
 		t.Fatalf("acks %+v", e.acks)

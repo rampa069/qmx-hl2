@@ -296,9 +296,16 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.RXGainDB = cfg.RXGainDB
 	ecfg.SwapIQ = cfg.SwapIQ
 
+	// The CAT client outlives the engine so the engine can restore the radio on exit.
+	cat := qmx.NewClient(port)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	catDone := make(chan error, 1)
+	go func() { catDone <- cat.Run(catCtx) }()
+	defer func() { catCancel(); <-catDone }()
+
 	// The engine sends through the server's socket, and the server calls the engine.
 	var srv *hpsdr.Server
-	eng := engine.New(ecfg, port, capt, senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) }))
+	eng := engine.New(ecfg, cat, capt, senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) }))
 	srv, err = hpsdr.NewServer(id, eng, cfg.Watchdog)
 	if err != nil {
 		return err
