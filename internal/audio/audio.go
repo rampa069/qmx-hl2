@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package audio gives the daemon stereo float32 access to the QMX USB sound card.
 //
 // Samples are interleaved stereo float32 in [-1, 1). In QMX IQ mode, left carries I and right

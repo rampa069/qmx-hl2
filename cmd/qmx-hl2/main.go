@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Command qmx-hl2 presents a QRP Labs QMX/QMX+ as a Hermes-Lite 2 (openHPSDR Protocol 1).
 //
 // The daemon streams QMX IQ to the client and, with -tx, transmits single-tone modes by

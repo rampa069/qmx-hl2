@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package dsp holds the small signal-processing blocks the RX path needs: DC blocking,
 // integer-factor interpolation, and NCO frequency shifting of complex baseband.
 package dsp

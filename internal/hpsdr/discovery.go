@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package hpsdr implements the radio side of openHPSDR Protocol 1 ("old protocol") as spoken by
 // a Hermes-Lite 2. The wire format is documented in doc/hl2/protocol1.md, and what clients
 // actually check is in doc/hl2/client-behavior.md.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package serial owns the USB CDC serial link to the QMX. CAT framing and command logic live in
 // a higher layer; this package only opens, closes, reads and writes the port.
 package serial

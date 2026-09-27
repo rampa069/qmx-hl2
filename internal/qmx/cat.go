@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package qmx speaks the QMX's Kenwood-style CAT dialect over its USB serial port.
 //
 // These helpers are synchronous and not safe for concurrent use on one port; callers serialise

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package engine connects the QMX (audio + CAT) to the Protocol 1 server: it streams QMX IQ to
 // the client as EP6 packets paced by the QMX capture clock, applies host register writes, and
 // keeps the QMX tuned so that its IQ window covers RX1.

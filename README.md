@@ -186,4 +186,21 @@ details possible.
 
 ## License
 
-To be decided before the first public release.
+Copyright (C) 2026 Ramon Martinez.
+
+qmx-hl2 is free software: you can redistribute it and/or modify it under the terms of the GNU
+General Public License as published by the Free Software Foundation, either version 2 of the
+License, or (at your option) any later version. See [`LICENSE`](LICENSE).
+
+Third-party components:
+
+- [PortAudio](https://www.portaudio.com/): MIT-style license.
+- [gordonklaus/portaudio](https://github.com/gordonklaus/portaudio) Go bindings: MIT.
+- [go.bug.st/serial](https://github.com/bugst/go-serial): BSD-3-Clause.
+- The static Linux binaries also include [alsa-lib](https://github.com/alsa-project/alsa-lib),
+  LGPL-2.1-or-later. The exact source used is the upstream `alsa-lib-1.2.12` release, which the
+  `Makefile` downloads.
+
+The reference documents under `doc/*/ref` remain the property of their authors (QRP Labs, the
+Hermes-Lite project, TAPR/openHPSDR). They are included for convenience, with their sources
+listed in each `ref/README.md`.

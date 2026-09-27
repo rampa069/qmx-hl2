@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Ramon Martinez
+
 // Package probe supports the bench checks in QMX-dfb.1: IQ levels, DC offset and the QMX
 // sample clock measured against the host clock.
 package probe
