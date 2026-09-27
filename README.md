@@ -13,7 +13,7 @@ client's transmit I/Q into something the QMX can transmit.
 
 ## Status
 
-Working on the air with **Zeus** (OpenHPSDR Zeus) (September 2026), using its
+Working on the air with **[Zeus](https://github.com/abhishekprakash22/zeus)** (September 2026), using its
 built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 
 | Function | Status |

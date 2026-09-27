@@ -1,5 +1,5 @@
 BINARY  := qmx-hl2
-MODULE  := github.com/rampa/qmx-hl2
+MODULE  := github.com/rampa069/qmx-hl2
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X $(MODULE)/internal/config.Version=$(VERSION)
 NPROC   := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)

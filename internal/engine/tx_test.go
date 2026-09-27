@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rampa/qmx-hl2/internal/hpsdr"
+	"github.com/rampa069/qmx-hl2/internal/hpsdr"
 )
 
 type fakeTXRadio struct {

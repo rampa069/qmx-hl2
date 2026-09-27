@@ -18,14 +18,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rampa/qmx-hl2/internal/audio"
-	"github.com/rampa/qmx-hl2/internal/config"
-	"github.com/rampa/qmx-hl2/internal/engine"
-	"github.com/rampa/qmx-hl2/internal/hpsdr"
-	"github.com/rampa/qmx-hl2/internal/logging"
-	"github.com/rampa/qmx-hl2/internal/probe"
-	"github.com/rampa/qmx-hl2/internal/qmx"
-	"github.com/rampa/qmx-hl2/internal/serial"
+	"github.com/rampa069/qmx-hl2/internal/audio"
+	"github.com/rampa069/qmx-hl2/internal/config"
+	"github.com/rampa069/qmx-hl2/internal/engine"
+	"github.com/rampa069/qmx-hl2/internal/hpsdr"
+	"github.com/rampa069/qmx-hl2/internal/logging"
+	"github.com/rampa069/qmx-hl2/internal/probe"
+	"github.com/rampa069/qmx-hl2/internal/qmx"
+	"github.com/rampa069/qmx-hl2/internal/serial"
 )
 
 func main() {

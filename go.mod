@@ -1,4 +1,4 @@
-module github.com/rampa/qmx-hl2
+module github.com/rampa069/qmx-hl2
 
 go 1.25.0
 

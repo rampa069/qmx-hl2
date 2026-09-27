@@ -19,10 +19,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rampa/qmx-hl2/internal/audio"
-	"github.com/rampa/qmx-hl2/internal/dsp"
-	"github.com/rampa/qmx-hl2/internal/hpsdr"
-	"github.com/rampa/qmx-hl2/internal/qmx"
+	"github.com/rampa069/qmx-hl2/internal/audio"
+	"github.com/rampa069/qmx-hl2/internal/dsp"
+	"github.com/rampa069/qmx-hl2/internal/hpsdr"
+	"github.com/rampa069/qmx-hl2/internal/qmx"
 )
 
 // Config tunes the engine.

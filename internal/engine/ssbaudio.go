@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rampa/qmx-hl2/internal/audio"
+	"github.com/rampa069/qmx-hl2/internal/audio"
 )
 
 // ssbAudio plays SSB transmit audio to the QMX's USB sound card.

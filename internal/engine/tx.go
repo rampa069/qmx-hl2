@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rampa/qmx-hl2/internal/dsp"
-	"github.com/rampa/qmx-hl2/internal/hpsdr"
+	"github.com/rampa069/qmx-hl2/internal/dsp"
+	"github.com/rampa069/qmx-hl2/internal/hpsdr"
 )
 
 // TXRadio is the part of the QMX CAT client the transmitter needs.
