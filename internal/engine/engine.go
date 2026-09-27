@@ -16,6 +16,7 @@ import (
 	"math/rand/v2"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rampa/qmx-hl2/internal/audio"
@@ -93,6 +94,8 @@ type Engine struct {
 
 	tune     chan struct{}
 	playback audio.PlaybackStream
+
+	ep2Count, ep6Count atomic.Int64 // packet counters for the rate log
 }
 
 // New creates an engine. The capture stream must be open and delivering stereo IQ.
@@ -166,6 +169,7 @@ func (e *Engine) EP2(pkt []byte) {
 	if !hpsdr.ParseEP2(pkt, &frames) {
 		return
 	}
+	e.ep2Count.Add(1)
 	retune := false
 	e.mu.Lock()
 	for _, f := range frames {
@@ -411,7 +415,13 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		rng     = rand.New(rand.NewPCG(1, 2))
 		lastBal time.Time
 	)
+	var (
+		rateT0           = time.Now()
+		rateEP2, rateEP6 int64
+		rateFrames       int64
+	)
 	send := func(pkt []byte) {
+		e.ep6Count.Add(1)
 		if err := e.out.Send(pkt, client); err != nil {
 			sendErr++
 			if sendErr == 1 || sendErr%1000 == 0 {
@@ -452,6 +462,13 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		}
 		if n > 0 {
 			floor.add(pow / float64(n))
+		}
+		rateFrames += int64(n)
+		if el := time.Since(rateT0).Seconds(); el >= 30 {
+			e2, e6 := e.ep2Count.Load(), e.ep6Count.Load()
+			slog.Debug("packet rates", "qmx_frames_s", math.Round(float64(rateFrames)/el),
+				"ep6_s", math.Round(float64(e6-rateEP6)/el*10)/10, "ep2_s", math.Round(float64(e2-rateEP2)/el*10)/10)
+			rateT0, rateEP2, rateEP6, rateFrames = time.Now(), e2, e6, 0
 		}
 		if e.cfg.IQBalance && time.Since(lastBal) > time.Minute {
 			lastBal = time.Now()
