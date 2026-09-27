@@ -72,6 +72,8 @@ type Engine struct {
 	txActive  bool         // QMX keyed: RX IQ is junk and retuning waits
 	txEndedAt time.Time
 	forceTune bool
+	txWatts   float64 // last QMX power/SWR reading while keyed, for EP6 telemetry
+	txSWR     float64
 
 	tune chan struct{}
 }
@@ -88,6 +90,11 @@ func New(cfg Config, cat *qmx.Client, capt audio.CaptureStream, out Sender) *Eng
 	}
 	if cfg.TX.Enabled {
 		e.tx = newTransmitter(cfg.TX, cat, e.setTXActive)
+		e.tx.meter = func(w, swr float64) {
+			e.mu.Lock()
+			e.txWatts, e.txSWR = w, swr
+			e.mu.Unlock()
+		}
 	}
 	return e
 }
@@ -96,6 +103,7 @@ func (e *Engine) setTXActive(on bool) {
 	e.mu.Lock()
 	e.txActive = on
 	if !on {
+		e.txWatts, e.txSWR = 0, 0
 		e.txEndedAt = time.Now()
 		e.forceTune = true // the transmitter moved the dial
 	}
@@ -356,6 +364,7 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		now := time.Now()
 		mute := now.Before(e.muteUntil) || e.txActive || now.Sub(e.txEndedAt) < 100*time.Millisecond
 		transmitting := e.txActive
+		watts, swr := e.txWatts, e.txSWR
 		client = e.client
 		e.mu.Unlock()
 
@@ -417,9 +426,11 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 				builder.AddRound(round)
 			}
 		}
-		tel := hpsdr.Telemetry{Overload: overload}
+		tel := hpsdr.Telemetry{Overload: overload, Temp: hpsdr.TempRaw(30)}
 		if transmitting {
 			tel.TXFIFO = 16 // a plausible ~10 ms of TX buffer, as a real HL2 would report
+			tel.FwdPower = hpsdr.PowerRaw(watts)
+			tel.RevPower = hpsdr.ReversePowerRaw(watts, swr)
 		}
 		builder.SetTelemetry(tel)
 	}

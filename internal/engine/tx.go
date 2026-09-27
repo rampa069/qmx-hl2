@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/rampa/qmx-hl2/internal/dsp"
@@ -83,6 +84,8 @@ type transmitter struct {
 	now    func() time.Time
 	// active is called with true when the QMX is keyed and false when it returns to RX.
 	active func(on bool)
+	// meter, if set, receives the QMX's measured power (W) and SWR during TX.
+	meter func(watts, swr float64)
 
 	state     txState
 	tr        *dsp.ToneTracker
@@ -92,11 +95,11 @@ type transmitter struct {
 	toneOn    bool
 	lastTone  float64
 	lastSent  time.Time
-	lastSWR   time.Time
 	highSWR   int
 	armedFreq uint32
 
 	lastPower, lastSWRVal float64
+	keyed                 atomic.Bool // read by meterLoop
 }
 
 func newTransmitter(cfg TXConfig, radio TXRadio, active func(bool)) *transmitter {
@@ -123,6 +126,10 @@ func (t *transmitter) run(ctx context.Context) {
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	defer t.keyUp("shutdown")
+	// Meter queries can take up to the CAT timeout; run them off the frame path so tone
+	// updates never stall behind them.
+	readings := make(chan meterReading, 1)
+	go t.meterLoop(ctx, readings)
 	for {
 		select {
 		case <-ctx.Done():
@@ -131,7 +138,64 @@ func (t *transmitter) run(ctx context.Context) {
 			t.frame(ctx, f)
 		case <-tick.C:
 			t.tick(ctx)
+		case r := <-readings:
+			t.onMeter(r)
 		}
+	}
+}
+
+type meterReading struct {
+	watts, swr float64
+	ok         bool
+}
+
+// meterLoop polls power and SWR every 300 ms while the QMX is keyed.
+func (t *transmitter) meterLoop(ctx context.Context, out chan<- meterReading) {
+	tick := time.NewTicker(300 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if !t.keyed.Load() {
+			continue
+		}
+		swr, err1 := t.radio.SWR(ctx)
+		watts, err2 := t.radio.PowerOut(ctx)
+		select {
+		case out <- meterReading{watts: watts, swr: swr, ok: err1 == nil && err2 == nil}:
+		default:
+		}
+	}
+}
+
+// onMeter updates the client-facing meters and applies the SWR guard.
+func (t *transmitter) onMeter(r meterReading) {
+	if t.state != txOn {
+		return
+	}
+	watts, swr := r.watts, r.swr
+	if !t.toneOn {
+		watts, swr = 0, 0
+	}
+	t.lastPower, t.lastSWRVal = watts, swr
+	if t.meter != nil {
+		t.meter(watts, swr)
+	}
+	slog.Debug("TX meter", "power_w", watts, "swr", swr, "tone", t.lastTone)
+	if !r.ok || swr == 0 || !t.toneOn || t.now().Sub(t.onSince) < t.cfg.SWRGrace {
+		return
+	}
+	if swr > t.cfg.SWRMax {
+		t.highSWR++
+		slog.Warn("high SWR", "swr", swr, "count", t.highSWR)
+		if t.highSWR >= 2 {
+			t.abort("high SWR")
+		}
+	} else {
+		t.highSWR = 0
 	}
 }
 
@@ -195,9 +259,9 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 		return
 	}
 	t.state = txOn
+	t.keyed.Store(true)
 	t.onSince = now
 	t.highSWR = 0
-	t.lastSWR = now
 	t.toneOn = false
 	if t.active != nil {
 		t.active(true)
@@ -253,25 +317,6 @@ func (t *transmitter) tick(ctx context.Context) {
 		_ = t.radio.Tone(0)
 		t.lastSent = now
 	}
-	if t.toneOn && now.Sub(t.onSince) >= t.cfg.SWRGrace && now.Sub(t.lastSWR) >= 500*time.Millisecond {
-		t.lastSWR = now
-		swr, err := t.radio.SWR(ctx)
-		pwr, _ := t.radio.PowerOut(ctx)
-		t.lastPower, t.lastSWRVal = pwr, swr
-		slog.Debug("TX meter", "power_w", pwr, "swr", swr, "tone", t.lastTone)
-		if err != nil || swr == 0 {
-			return
-		}
-		if swr > t.cfg.SWRMax {
-			t.highSWR++
-			slog.Warn("high SWR", "swr", swr, "count", t.highSWR)
-			if t.highSWR >= 2 {
-				t.abort("high SWR")
-			}
-		} else {
-			t.highSWR = 0
-		}
-	}
 }
 
 // abort keys up and ignores MOX until the host releases it.
@@ -283,6 +328,7 @@ func (t *transmitter) abort(reason string) {
 func (t *transmitter) keyUp(reason string) {
 	was := t.state
 	t.state = txIdle
+	t.keyed.Store(false)
 	if was == txOn {
 		_ = t.radio.Tone(0)
 		if err := t.radio.RX(); err != nil {

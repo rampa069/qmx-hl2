@@ -41,12 +41,14 @@ func (r *fakeTXRadio) count(prefix string) int {
 
 // harness drives a transmitter synchronously with a fake clock.
 type harness struct {
-	t      *testing.T
-	tx     *transmitter
-	radio  *fakeTXRadio
-	clock  time.Time
-	phase  float64
-	active []bool
+	t         *testing.T
+	tx        *transmitter
+	radio     *fakeTXRadio
+	clock     time.Time
+	phase     float64
+	active    []bool
+	lastMeter time.Time
+	meters    [][2]float64
 }
 
 func newHarness(t *testing.T) *harness {
@@ -55,6 +57,7 @@ func newHarness(t *testing.T) *harness {
 	cfg.Enabled = true
 	cfg.SwapIQ = false // the harness generates I=cos, Q=sin for positive frequencies
 	h.tx = newTransmitter(cfg, h.radio, func(on bool) { h.active = append(h.active, on) })
+	h.tx.meter = func(w, swr float64) { h.meters = append(h.meters, [2]float64{w, swr}) }
 	h.tx.now = func() time.Time { return h.clock }
 	return h
 }
@@ -73,6 +76,11 @@ func (h *harness) send(mox bool, txFreq uint32, bb, amp float64, d time.Duration
 		h.tx.frame(context.Background(), f)
 		h.clock = h.clock.Add(time.Second * hpsdr.SamplesPerEP2Frm / 48000)
 		h.tx.tick(context.Background())
+		// Stand in for meterLoop: a reading every 300 ms while keyed.
+		if h.tx.keyed.Load() && h.clock.Sub(h.lastMeter) >= 300*time.Millisecond {
+			h.lastMeter = h.clock
+			h.tx.onMeter(meterReading{watts: 3.8, swr: h.radio.swr, ok: true})
+		}
 	}
 }
 
@@ -202,5 +210,18 @@ func TestTXToneOutOfRange(t *testing.T) {
 	h.send(true, 14074000, 8500, 0.5, 50*time.Millisecond)
 	if h.tx.state != txInhibit || h.radio.count("RX") != 1 {
 		t.Fatalf("state %v log %v", h.tx.state, h.radio.log)
+	}
+}
+
+func TestTXMetersReported(t *testing.T) {
+	h := newHarness(t)
+	h.send(true, 14074000, 1500, 0.5, time.Second)
+	if len(h.meters) < 2 || h.meters[len(h.meters)-1] != [2]float64{3.8, 1.2} {
+		t.Fatalf("meters %v", h.meters)
+	}
+	// During a silent gap the client sees no power.
+	h.send(true, 14074000, 0, 0, 400*time.Millisecond)
+	if last := h.meters[len(h.meters)-1]; last != [2]float64{0, 0} {
+		t.Fatalf("gap meter %v", last)
 	}
 }
