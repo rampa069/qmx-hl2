@@ -3,6 +3,9 @@ MODULE  := github.com/rampa069/qmx-hl2
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X $(MODULE)/internal/config.Version=$(VERSION)
 NPROC   := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
+PA_VERSION   := 19.7.0
+ALSA_VERSION := 1.2.12
+DEPS         := $(CURDIR)/deps
 
 # Native build. On macOS this needs `brew install portaudio pkg-config`; on Linux/Raspberry Pi
 # OS, `apt install portaudio19-dev pkg-config`.
@@ -24,12 +27,58 @@ tidy:
 clean:
 	rm -f $(BINARY) $(BINARY)-*
 
-# --- macOS universal targets -------------------------------------------------
-.PHONY: darwin-arm64 darwin-amd64
+# --- macOS: PortAudio built statically per architecture ---------------------
+# The resulting binaries only depend on system frameworks (no Homebrew needed to run).
+.PHONY: darwin-arm64 darwin-amd64 darwin-static
 darwin-arm64:
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-arm64 ./cmd/qmx-hl2/
+	$(MAKE) darwin-static GOARCH_T=arm64 MACARCH=arm64
 darwin-amd64:
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-amd64 ./cmd/qmx-hl2/
+	$(MAKE) darwin-static GOARCH_T=amd64 MACARCH=x86_64
+
+darwin-static: $(DEPS)/darwin-$(MACARCH)/pa/lib/libportaudio.a
+	GOOS=darwin GOARCH=$(GOARCH_T) CGO_ENABLED=1 CGO_CFLAGS="-arch $(MACARCH)" CGO_LDFLAGS="-arch $(MACARCH)" \
+		PKG_CONFIG_LIBDIR="$(DEPS)/darwin-$(MACARCH)/pa/lib/pkgconfig" \
+		go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-$(GOARCH_T) ./cmd/qmx-hl2/
+
+$(DEPS)/darwin-$(MACARCH)/pa/lib/libportaudio.a: $(DEPS)/portaudio-$(PA_VERSION)/CMakeLists.txt
+	mkdir -p $(DEPS)/darwin-$(MACARCH)/pa-build
+	cd $(DEPS)/darwin-$(MACARCH)/pa-build && cmake $(DEPS)/portaudio-$(PA_VERSION) \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_OSX_ARCHITECTURES=$(MACARCH) \
+		-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DPA_BUILD_TESTS=OFF -DPA_BUILD_EXAMPLES=OFF
+	$(MAKE) -C $(DEPS)/darwin-$(MACARCH)/pa-build portaudio_static -j$(NPROC)
+	mkdir -p $(DEPS)/darwin-$(MACARCH)/pa/lib/pkgconfig $(DEPS)/darwin-$(MACARCH)/pa/include
+	cp $(DEPS)/darwin-$(MACARCH)/pa-build/libportaudio.a $(DEPS)/darwin-$(MACARCH)/pa/lib/
+	cp $(DEPS)/portaudio-$(PA_VERSION)/include/portaudio.h $(DEPS)/darwin-$(MACARCH)/pa/include/
+	printf 'prefix=$(DEPS)/darwin-$(MACARCH)/pa\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: PortAudio\nDescription: PortAudio (static, CoreAudio)\nVersion: 19\n\nLibs: -L$${libdir} -lportaudio -framework CoreAudio -framework AudioToolbox -framework AudioUnit -framework CoreFoundation -framework CoreServices\nCflags: -I$${includedir}\n' \
+		> $(DEPS)/darwin-$(MACARCH)/pa/lib/pkgconfig/portaudio-2.0.pc
+
+# --- Windows x86-64 from macOS (mingw-w64), static ---------------------------
+#   brew install mingw-w64 cmake
+.PHONY: windows-amd64
+windows-amd64: $(DEPS)/win64/pa/lib/libportaudio.a
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+		PKG_CONFIG_LIBDIR="$(DEPS)/win64/pa/lib/pkgconfig" \
+		go build -ldflags "$(LDFLAGS) -linkmode external -extldflags '-static'" \
+		-o $(BINARY)-windows-amd64.exe ./cmd/qmx-hl2/
+
+$(DEPS)/win64/pa/lib/libportaudio.a: $(DEPS)/portaudio-$(PA_VERSION)/CMakeLists.txt
+	mkdir -p $(DEPS)/win64/pa-build
+	cd $(DEPS)/win64/pa-build && cmake $(DEPS)/portaudio-$(PA_VERSION) \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_SYSTEM_NAME=Windows \
+		-DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+		-DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+		-DPA_USE_WASAPI=ON -DPA_USE_WMME=ON -DPA_USE_WDMKS=OFF -DPA_USE_DS=OFF -DPA_USE_ASIO=OFF \
+		-DPA_BUILD_TESTS=OFF -DPA_BUILD_EXAMPLES=OFF
+	$(MAKE) -C $(DEPS)/win64/pa-build portaudio_static -j$(NPROC)
+	mkdir -p $(DEPS)/win64/pa/lib/pkgconfig $(DEPS)/win64/pa/include
+	cp $(DEPS)/win64/pa-build/libportaudio.a $(DEPS)/win64/pa/lib/
+	cp $(DEPS)/portaudio-$(PA_VERSION)/include/portaudio.h $(DEPS)/win64/pa/include/
+	printf 'prefix=$(DEPS)/win64/pa\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: PortAudio\nDescription: PortAudio (static, WASAPI+WMME)\nVersion: 19\n\nLibs: -L$${libdir} -lportaudio -lwinmm -lole32 -luuid -lsetupapi\nCflags: -I$${includedir}\n' \
+		> $(DEPS)/win64/pa/lib/pkgconfig/portaudio-2.0.pc
+
+# --- Everything, for a release ------------------------------------------------
+.PHONY: release-binaries
+release-binaries: linux-amd64 linux-arm64 darwin-arm64 darwin-amd64 windows-amd64
 
 # --- Static Linux cross-builds from macOS (musl) ----------------------------
 # Ported from uSDX/audioStreamer. Unlike the original, PortAudio and ALSA are built per
@@ -39,9 +88,6 @@ darwin-amd64:
 #   (for arm64 also: brew reinstall musl-cross --with-aarch64)
 #   make linux-amd64      # x86_64 Linux
 #   make linux-arm64      # Raspberry Pi 4/5 with 64-bit OS
-PA_VERSION   := 19.7.0
-ALSA_VERSION := 1.2.12
-DEPS         := $(CURDIR)/deps
 
 .PHONY: linux-amd64 linux-arm64
 linux-amd64:

@@ -79,13 +79,17 @@ make build        # ./qmx-hl2 for this machine
 make test
 ```
 
-Static Linux binaries can be cross-compiled from macOS with `musl-cross` and `cmake`;
-PortAudio and ALSA are downloaded and built automatically. (A Windows target with
-`mingw-w64` is planned; a manual static build already works.)
+Self-contained binaries for every platform can be built on macOS. They need `cmake`,
+`musl-cross` (Linux) and `mingw-w64` (Windows). PortAudio (and ALSA for Linux) are downloaded
+and linked statically, so the binaries need nothing installed on the target machine.
 
 ```sh
-make linux-amd64  # qmx-hl2-linux-amd64 (static)
-make linux-arm64  # qmx-hl2-linux-arm64 (static, Raspberry Pi 64-bit)
+make linux-amd64      # qmx-hl2-linux-amd64 (static)
+make linux-arm64      # qmx-hl2-linux-arm64 (static, Raspberry Pi 64-bit)
+make darwin-arm64     # qmx-hl2-darwin-arm64 (Apple silicon)
+make darwin-amd64     # qmx-hl2-darwin-amd64 (Intel Mac)
+make windows-amd64    # qmx-hl2-windows-amd64.exe
+make release-binaries # all of the above
 ```
 
 ## Quick start
