@@ -13,7 +13,8 @@ client's transmit I/Q into something the QMX can transmit.
 
 ## Status
 
-Working on the air with **Zeus + WSJT-X** (September 2026):
+Working on the air with **Zeus** (OpenHPSDR Zeus) (September 2026), using its
+built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 
 | Function | Status |
 |---|---|
@@ -105,7 +106,8 @@ make linux-arm64  # qmx-hl2-linux-arm64 (static, Raspberry Pi 64-bit)
    ./qmx-hl2 -v -tx
    ```
 4. In your client, discover radios. A **Hermes-Lite 2** should appear. Start it.
-5. For digital modes, point WSJT-X (or similar) at your client as usual; the QMX follows the
+5. Operate as you would with a real HL2: the client's own digital modes (Zeus has FT8, FT4,
+   WSPR and SSTV built in) or external programs such as WSJT-X all work. The QMX follows the
    client's TX frequency and mode.
 
 On exit (Ctrl-C) the daemon puts the QMX back to the frequency, mode, IQ-mode and CAT-watchdog
