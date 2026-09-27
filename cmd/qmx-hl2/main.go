@@ -1,7 +1,7 @@
 // Command qmx-hl2 presents a QRP Labs QMX/QMX+ as a Hermes-Lite 2 (openHPSDR Protocol 1).
 //
-// Only the bench helpers exist so far: -list and -probe. The protocol daemon is tracked in
-// beads epic QMX-dfb.
+// So far the daemon answers discovery and start/stop only; RX/TX streaming is tracked in beads
+// epic QMX-dfb. -list and -probe are bench helpers.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/rampa/qmx-hl2/internal/audio"
 	"github.com/rampa/qmx-hl2/internal/config"
+	"github.com/rampa/qmx-hl2/internal/hpsdr"
 	"github.com/rampa/qmx-hl2/internal/logging"
 	"github.com/rampa/qmx-hl2/internal/probe"
 	"github.com/rampa/qmx-hl2/internal/serial"
@@ -55,8 +57,7 @@ func run() int {
 	case cfg.Probe > 0:
 		err = runProbe(ctx, cfg)
 	default:
-		fmt.Fprintln(os.Stderr, "the HL2 daemon is not implemented yet; use -list or -probe <duration> (see -h)")
-		return 2
+		err = runDaemon(ctx, cfg)
 	}
 	if err != nil {
 		slog.Error("failed", "err", err)
@@ -256,4 +257,37 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 			pr.rate, pr.ppm, pr.underflows, ppm-pr.ppm)
 	}
 	return nil
+}
+
+// logHandler is the protocol handler until the RX/TX pipelines exist (QMX-dfb.5/6).
+type logHandler struct{ ep2 int }
+
+func (h *logHandler) Started(addr netip.AddrPort, cmd hpsdr.StartStop) {
+	h.ep2 = 0
+	fmt.Printf("client %s started streaming (wideband=%v watchdog_disabled=%v); EP6 not implemented yet\n",
+		addr, cmd.Wideband, cmd.WatchdogDisable)
+}
+
+func (h *logHandler) Stopped(reason string) {
+	fmt.Printf("stream stopped: %s (%d EP2 packets)\n", reason, h.ep2)
+}
+
+func (h *logHandler) EP2([]byte) { h.ep2++ }
+
+func runDaemon(ctx context.Context, cfg *config.Config) error {
+	id := hpsdr.DefaultIdentity()
+	mac, err := hpsdr.ParseMAC(cfg.MAC)
+	if err != nil {
+		return fmt.Errorf("-mac: %w", err)
+	}
+	id.MAC = mac
+	srv, err := hpsdr.NewServer(id, &logHandler{}, cfg.Watchdog)
+	if err != nil {
+		return err
+	}
+	if err := srv.Listen(cfg.Listen); err != nil {
+		return err
+	}
+	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s); Ctrl-C to stop\n", srv.LocalAddr(), id.MAC)
+	return srv.Serve(ctx)
 }

@@ -21,6 +21,11 @@ type Config struct {
 	LogFile     string
 	Verbose     bool
 
+	// Protocol 1 server.
+	Listen   string        // UDP listen address, normally ":1024"
+	MAC      string        // MAC reported in discovery replies
+	Watchdog time.Duration // stop streaming after this long without EP2 packets
+
 	// One-shot modes.
 	List          bool          // list audio devices and serial ports, then exit
 	Probe         time.Duration // capture this long, report IQ levels and measured rate, then exit
@@ -41,6 +46,9 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.StringVar(&c.LogDir, "logdir", "logs", "directory for log files")
 	fs.StringVar(&c.LogFile, "logfile", "", "log file path (default: timestamped file in -logdir)")
 	fs.BoolVar(&c.Verbose, "v", false, "verbose console logging")
+	fs.StringVar(&c.Listen, "listen", ":1024", "UDP address for the emulated Hermes-Lite 2")
+	fs.StringVar(&c.MAC, "mac", "00:1c:c0:a2:51:4d", "MAC address reported in discovery replies")
+	fs.DurationVar(&c.Watchdog, "watchdog", 12*time.Second, "stop streaming after this long without packets from the client (0 disables)")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
 	fs.BoolVar(&c.ProbeIQMode, "iq", false, "with -probe: enable QMX IQ mode (Q91;) during the capture")
@@ -54,6 +62,9 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	}
 	if c.SampleRate <= 0 || c.Frames <= 0 {
 		return nil, fmt.Errorf("-rate and -frames must be positive")
+	}
+	if c.Watchdog < 0 {
+		return nil, fmt.Errorf("-watchdog must not be negative")
 	}
 	if c.Probe < 0 {
 		return nil, fmt.Errorf("-probe must not be negative")
