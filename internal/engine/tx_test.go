@@ -53,6 +53,7 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, radio: &fakeTXRadio{swr: 1.2}, clock: time.Unix(1000, 0)}
 	cfg := DefaultTXConfig()
 	cfg.Enabled = true
+	cfg.SwapIQ = false // the harness generates I=cos, Q=sin for positive frequencies
 	h.tx = newTransmitter(cfg, h.radio, func(on bool) { h.active = append(h.active, on) })
 	h.tx.now = func() time.Time { return h.clock }
 	return h

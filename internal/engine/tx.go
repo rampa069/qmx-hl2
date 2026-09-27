@@ -43,7 +43,9 @@ type TXConfig struct {
 	// (the QMX reports a large transient at key-down).
 	SWRMax   float64
 	SWRGrace time.Duration
-	// SwapIQ exchanges the host's TX I and Q words (if tones come out mirrored).
+	// SwapIQ exchanges the host's TX I and Q words. HPSDR clients send TX I/Q "reversed
+	// relative to receive" (USB protocol doc); with Zeus on 2026-09-27 an FT8 tone at +1500 Hz
+	// arrived as -1500 Hz unswapped, so the default is true.
 	SwapIQ bool
 }
 
@@ -54,6 +56,7 @@ func DefaultTXConfig() TXConfig {
 		GateLevel: 0.01, Window: 240,
 		Starve: 150 * time.Millisecond, MaxTX: 3 * time.Minute,
 		SWRMax: 3.0, SWRGrace: 600 * time.Millisecond,
+		SwapIQ: true,
 	}
 }
 

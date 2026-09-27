@@ -297,7 +297,9 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.RXGainDB = cfg.RXGainDB
 	ecfg.SwapIQ = cfg.SwapIQ
 	ecfg.TX.Enabled = cfg.TX
-	ecfg.TX.SwapIQ = cfg.TXSwapIQ
+	if cfg.TXSwapIQ {
+		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ
+	}
 
 	// The CAT client outlives the engine so the engine can restore the radio on exit.
 	cat := qmx.NewClient(port)

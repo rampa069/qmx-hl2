@@ -56,7 +56,7 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.Float64Var(&c.RXGainDB, "rxgain", 0, "digital gain in dB applied to the QMX IQ")
 	fs.BoolVar(&c.SwapIQ, "swapiq", false, "swap I and Q (if the spectrum appears mirrored)")
 	fs.BoolVar(&c.TX, "tx", false, "enable transmit: key the QMX (Digi tone via CAT TA) when the client sends MOX")
-	fs.BoolVar(&c.TXSwapIQ, "txswapiq", false, "swap the client's TX I and Q (if transmitted tones come out mirrored)")
+	fs.BoolVar(&c.TXSwapIQ, "txswapiq", false, "invert the TX I/Q convention (use if transmitted tones come out mirrored around the dial)")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
 	fs.BoolVar(&c.ProbeIQMode, "iq", false, "with -probe: enable QMX IQ mode (Q91;) during the capture")

@@ -254,6 +254,7 @@ func TestEngineTransmitsWithTA(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.IQSettle = 0
 	cfg.TX.Enabled = true
+	cfg.TX.SwapIQ = false // ep2Tone generates I=cos, Q=sin
 	client := qmx.NewClient(cat)
 	catCtx, catCancel := context.WithCancel(context.Background())
 	defer catCancel()
