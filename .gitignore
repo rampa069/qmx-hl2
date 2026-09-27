@@ -21,3 +21,4 @@ doc/*/ref/*
 /qmx-hl2-*
 /deps/
 /logs/
+/dist/
