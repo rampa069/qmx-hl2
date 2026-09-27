@@ -332,3 +332,42 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestEngineLOOffsetAndNoiseFill(t *testing.T) {
+	cat := newFakeCAT()
+	out := &capSender{}
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.LOOffset = -4000
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, &fakeCapture{frames: 240, toneHz: 3000}, out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	e.EP2(ep2([2]byte{0x00, 0x02 << 1}, [2]uint32{0x02<<24 | 0x04, 14074000})) // 192k, 1 RX
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	// LO = RX1 - 4 kHz, so the dial is RX1 + 8 kHz.
+	waitFor(t, func() bool { return cat.get("FA") == "FA00014082000;" }, "offset tune")
+	time.Sleep(300 * time.Millisecond)
+	out.take()
+	time.Sleep(400 * time.Millisecond)
+	pkts := out.take()
+	cancel()
+	<-done
+	rx := decode(pkts, 1, 0)
+	// The QMX tone at IQ +3 kHz is RF = LO + 3 kHz = RX1 - 1 kHz; mirrored on the wire: +1 kHz.
+	if a := toneAt(rx, 1000, 192000); a < 0.4 {
+		t.Errorf("tone at RX1-1kHz: %g", a)
+	}
+	// Noise fill: something well outside the QMX's +-24 kHz window.
+	var e2 float64
+	for _, f := range []float64{-60000, -45000, 50000, 70000} {
+		e2 += toneAt(rx, f, 192000)
+	}
+	if e2 == 0 {
+		t.Error("no noise fill outside the QMX band")
+	}
+}

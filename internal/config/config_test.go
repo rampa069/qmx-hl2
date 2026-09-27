@@ -33,6 +33,9 @@ func TestParseRejectsBadInput(t *testing.T) {
 		{"-probe", "-1s"},
 		{"extra"},
 		{"-nosuchflag"},
+		{"-maxtx", "0s"},
+		{"-looffset", "30000"},
+		{"-txmode", "fm"},
 	} {
 		if _, err := Parse(args, io.Discard); err == nil {
 			t.Errorf("Parse(%v) succeeded, want error", args)

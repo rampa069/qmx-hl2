@@ -301,6 +301,10 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	}
 	ecfg.TX.Enabled = cfg.TX
 	ecfg.TX.Mode = cfg.TXMode
+	ecfg.TX.MaxTX = cfg.MaxTX
+	ecfg.IQBalance = cfg.IQBal
+	ecfg.NoiseFill = cfg.NoiseFill
+	ecfg.LOOffset = cfg.LOOffset
 	ecfg.TX.SSBGain = math.Pow(10, cfg.SSBGain/20)
 	if cfg.TXSwapIQ {
 		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ

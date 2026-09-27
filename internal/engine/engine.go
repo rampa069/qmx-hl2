@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/netip"
 	"sync"
 	"time"
@@ -42,13 +43,23 @@ type Config struct {
 	// just as their TX IQ arrives mirrored: with a real HL2 they are right-way-up, while the
 	// unmirrored emulator output showed FT8 reflected around the RX1 centre (2026-09-27).
 	MirrorOutput bool
+	// IQBalance enables blind I/Q gain/phase correction (better image rejection).
+	IQBalance bool
+	// NoiseFill adds low-level noise (10 dB below the QMX's own floor) across the whole
+	// output band at 96/192/384 kHz, so the part the QMX cannot cover looks like a quiet band
+	// instead of a black hole.
+	NoiseFill bool
+	// LOOffset places the QMX's IQ centre this many Hz from RX1 (e.g. -4000), moving the
+	// QMX's strong low-frequency noise hump away from the middle of the display.
+	LOOffset int
 
 	TX TXConfig
 }
 
 // DefaultConfig returns bench-derived defaults.
 func DefaultConfig() Config {
-	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second, MirrorOutput: true, TX: DefaultTXConfig()}
+	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second, MirrorOutput: true,
+		IQBalance: true, NoiseFill: true, TX: DefaultTXConfig()}
 }
 
 // Sender transmits an EP6 packet to the client.
@@ -335,7 +346,8 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if rx1 == 0 || busy {
 				continue // after TX, setTXActive(false) requests a retune
 			}
-			want := rx1 + uint32(e.cfg.IFOffset)
+			centre := uint32(int64(rx1) + int64(e.cfg.LOOffset))
+			want := centre + uint32(e.cfg.IFOffset)
 			if want == dial {
 				continue
 			}
@@ -345,7 +357,7 @@ func (e *Engine) catLoop(ctx context.Context) {
 			}
 			dial = want
 			e.mu.Lock()
-			e.lo = float64(rx1)
+			e.lo = float64(centre)
 			e.mu.Unlock()
 			slog.Debug("tuned", "rx1", rx1, "dial", want)
 			if verify {
@@ -393,6 +405,11 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		up      = make([]complex128, 8)
 		round   = make([]hpsdr.IQ24, hpsdr.MaxReceivers)
 		sendErr int
+		xs      = make([]complex128, e.capt.FramesPerBuffer())
+		iqbal   = dsp.NewIQBalancer(float64(e.cfg.SampleRate), 2)
+		floor   = newFloorTracker(400) // ~2 s of 5 ms buffers
+		rng     = rand.New(rand.NewPCG(1, 2))
+		lastBal time.Time
 	)
 	send := func(pkt []byte) {
 		if err := e.out.Send(pkt, client); err != nil {
@@ -409,6 +426,37 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		}
 		if errors.Is(err, audio.ErrOverflow) {
 			slog.Warn("capture overflow")
+		}
+
+		// Condition the QMX IQ even when nobody is listening, so the DC blocker, I/Q
+		// balance and noise-floor estimate are settled when a client starts.
+		overload := false
+		var pow float64
+		for i := 0; i < n; i++ {
+			li, ri := float64(buf[2*i]), float64(buf[2*i+1])
+			if e.cfg.SwapIQ {
+				li, ri = ri, li
+			}
+			x := complex(li*gain, ri*gain)
+			if math.Abs(real(x)) > 0.99 || math.Abs(imag(x)) > 0.99 {
+				overload = true
+			}
+			if useDC {
+				x = dc.Process(x)
+			}
+			if e.cfg.IQBalance {
+				x = iqbal.Process(x)
+			}
+			pow += real(x)*real(x) + imag(x)*imag(x)
+			xs[i] = x
+		}
+		if n > 0 {
+			floor.add(pow / float64(n))
+		}
+		if e.cfg.IQBalance && time.Since(lastBal) > time.Minute {
+			lastBal = time.Now()
+			pc, sc := iqbal.Correction()
+			slog.Debug("I/Q balance", "phase_deg", math.Asin(math.Max(-1, math.Min(1, pc)))*180/math.Pi, "q_gain_db", 20*math.Log10(sc))
 		}
 
 		e.mu.Lock()
@@ -456,25 +504,23 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 			}
 		}
 
-		overload := false
 		L := interp.L
+		// Fill noise: 10 dB below the QMX floor density, spread over the whole output band.
+		// Per component: sigma^2 = floor * L * 0.1 / 2.
+		sigma := 0.0
+		if e.cfg.NoiseFill && L > 1 && !mute {
+			sigma = math.Sqrt(floor.min() * float64(L) * 0.1 / 2)
+		}
 		for i := 0; i < n; i++ {
-			li, ri := float64(buf[2*i]), float64(buf[2*i+1])
-			if e.cfg.SwapIQ {
-				li, ri = ri, li
-			}
-			x := complex(li*gain, ri*gain)
-			if math.Abs(real(x)) > 0.99 || math.Abs(imag(x)) > 0.99 {
-				overload = true
-			}
-			if useDC {
-				x = dc.Process(x)
-			}
+			x := xs[i]
 			if mute {
 				x = 0
 			}
 			interp.Process(x, up)
 			for k := 0; k < L; k++ {
+				if sigma > 0 {
+					up[k] += complex(sigma*rng.NormFloat64(), sigma*rng.NormFloat64())
+				}
 				for r, nco := range ncos {
 					y := nco.Mix(up[k])
 					q := imag(y)
@@ -507,4 +553,36 @@ func to24(v float64) int32 {
 		return -full - 1
 	}
 	return int32(math.Round(s))
+}
+
+// floorTracker estimates the band noise floor as the minimum of recent block powers.
+type floorTracker struct {
+	ring []float64
+	pos  int
+	full bool
+}
+
+func newFloorTracker(n int) *floorTracker { return &floorTracker{ring: make([]float64, n)} }
+
+func (f *floorTracker) add(p float64) {
+	f.ring[f.pos] = p
+	f.pos++
+	if f.pos == len(f.ring) {
+		f.pos, f.full = 0, true
+	}
+}
+
+func (f *floorTracker) min() float64 {
+	n := f.pos
+	if f.full {
+		n = len(f.ring)
+	}
+	if n == 0 {
+		return 0
+	}
+	m := f.ring[0]
+	for _, v := range f.ring[1:n] {
+		m = math.Min(m, v)
+	}
+	return m
 }
