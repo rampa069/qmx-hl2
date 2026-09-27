@@ -4,7 +4,7 @@
 // Package qmx speaks the QMX's Kenwood-style CAT dialect over its USB serial port.
 //
 // These helpers are synchronous and not safe for concurrent use on one port; callers serialise
-// access (the engine uses a single goroutine for CAT). A fuller client is tracked as QMX-dfb.3.
+// access. Client (client.go) is the concurrent-safe CAT client the daemon uses.
 package qmx
 
 import (

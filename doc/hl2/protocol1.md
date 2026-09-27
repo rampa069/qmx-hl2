@@ -8,10 +8,10 @@ the RTL is given and the disagreement is noted.
 
 | Key | Path | Notes |
 |---|---|---|
-| **WIKI** | `/Volumes/FastDisk/Radio/HL2/zeus/docs/references/firmware/hermes-lite-2/wiki/Protocol.md` (copy: `ref/hl2-wiki-Protocol.md`) | softerhardware HL2 wiki "Protocol" page |
+| **WIKI** | `zeus/docs/references/firmware/hermes-lite-2/wiki/Protocol.md` (copy: `ref/hl2-wiki-Protocol.md`) | softerhardware HL2 wiki "Protocol" page |
 | **USB** | `ref/USB_protocol_V1.60.txt` (from `zeus/docs/references/protocol-1/USB_protocol_V1.60.doc`) | openHPSDR USB protocol V1.60, the base 512-byte frame format |
 | **METIS** | `ref/Metis-How_it_works_V1.33.txt` (from `OpenHPSDR-Firmware/Protocol 1/Documentation/`) | Metis UDP encapsulation, discovery, start/stop |
-| **DS** | `/Volumes/FastDisk/Radio/HL2/gateware/Original/gateware/rtl/dsopenhpsdr1.v` | Parses host→radio packets. Upstream softerhardware repo, commit `7472bd1` (2025-11-24), gateware 74.2 |
+| **DS** | `gateware/Original/gateware/rtl/dsopenhpsdr1.v` | Parses host→radio packets. Upstream softerhardware repo, commit `7472bd1` (2025-11-24), gateware 74.2 |
 | **US** | `…/gateware/Original/gateware/rtl/usopenhpsdr1.v` | Builds radio→host packets (EP6, EP4, discovery) |
 | **CTL** | `…/gateware/Original/gateware/rtl/control.v` | Response rotation, ACK FSM, PA/TR, CW input |
 | **RADIO** | `…/gateware/Original/gateware/rtl/radio_openhpsdr1/radio.v` | NCOs, TX state machine (latency, PTT hang, CW) |
@@ -19,7 +19,7 @@ the RTL is given and the disagreement is noted.
 | **CORE** | `…/gateware/Original/gateware/rtl/hermeslite_core.v` | Parameters (NR, version) and wiring |
 | **AD** | `…/gateware/Original/gateware/rtl/ad9866.v`, `ad9866ctrl.v` | LNA gain and TX drive decoding |
 
-The user's fork `/Volumes/FastDisk/Radio/HL2/Hermes-Lite2` (gateware 74.102, `*.sv`
+The user's fork `Hermes-Lite2` (gateware 74.102, `*.sv`
 files) has the same protocol logic. The only protocol-visible difference is in the
 extended-debug discovery bytes: there, the reported defaults for TX latency and PTT
 hang are 20/12 ms instead of 10/4 ms, so they match `radio.v`.

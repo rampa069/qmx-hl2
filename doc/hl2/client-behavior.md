@@ -8,11 +8,11 @@ Clients examined, all local:
 
 | Client | Path | Version | Key files |
 |---|---|---|---|
-| piHPSDR (DL1YCF) | `/Volumes/FastDisk/Radio/HL2/pihpsdr/src` | git 1d36271a | `old_discovery.c`, `old_protocol.c`, `radio.c`, `transmitter.c`, `hpsdrsim.c` |
-| deskHPSDR (fork) | `/Volumes/FastDisk/Radio/HL2/deskhpsdr/src` | git 470d605 | same file names |
-| Thetis, mi0bot HL2 fork | `/Volumes/FastDisk/Radio/HL2/OpenHPSDR-Thetis/Project Files/Source/` | git e3375d0 | `ChannelMaster/networkproto1.c`, `netInterface.c`, `network.c`; `Console/HPSDR/clsRadioDiscovery.cs`, `NetworkIO.cs`, `IoBoardHl2.cs`, `console.cs`, `setup.cs` |
-| Quisk (N2ADR) | `/Volumes/FastDisk/Radio/HL2/quisk` | 4.2.51, git e6b9d9d | `hermes/quisk_hardware.py`, `quisk.c`, `microphone.c` |
-| hermeslite.py | `/Volumes/FastDisk/Radio/HL2/Hermes-Lite2/software/hermeslite/hermeslite.py` | – | port-1025 setup tool |
+| piHPSDR (DL1YCF) | `pihpsdr/src` | git 1d36271a | `old_discovery.c`, `old_protocol.c`, `radio.c`, `transmitter.c`, `hpsdrsim.c` |
+| deskHPSDR (fork) | `deskhpsdr/src` | git 470d605 | same file names |
+| Thetis, mi0bot HL2 fork | `OpenHPSDR-Thetis/Project Files/Source/` | git e3375d0 | `ChannelMaster/networkproto1.c`, `netInterface.c`, `network.c`; `Console/HPSDR/clsRadioDiscovery.cs`, `NetworkIO.cs`, `IoBoardHl2.cs`, `console.cs`, `setup.cs` |
+| Quisk (N2ADR) | `quisk` | 4.2.51, git e6b9d9d | `hermes/quisk_hardware.py`, `quisk.c`, `microphone.c` |
+| hermeslite.py | `Hermes-Lite2/software/hermeslite/hermeslite.py` | – | port-1025 setup tool |
 
 Line numbers are for these checkouts. Thetis paths are relative to `Project Files/Source/`.
 SparkSDR, SDR Console, linHPSDR and PowerSDR are closed or not present locally. They are

@@ -13,11 +13,7 @@ CLAUDE.md
 doc/*/ref/*
 !doc/*/ref/README.md
 
-# Dolt
-.dolt/
 *.db
-.beads-credential-key
-.beads/proxieddb/
 *.gate.lock*
 
 # Go build outputs and local artifacts
