@@ -27,7 +27,7 @@ built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 | Power / SWR meters in the client | works |
 | Other clients (Thetis, piHPSDR, SparkSDR, Quisk) | not yet tested |
 | Linux x86-64 | tested (Debian 13) |
-| macOS | builds; used for development |
+| macOS | signed and notarized binaries; used for development |
 | Raspberry Pi (Linux arm64) | builds; not yet tested on hardware |
 | Windows x86-64 | tested |
 
