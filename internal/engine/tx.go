@@ -467,11 +467,16 @@ func (t *transmitter) keyUp(reason string) {
 	if was == txOn {
 		if t.voice {
 			u, ppm := t.ssb.Stats()
-			slog.Info("SSB audio", "underruns", u, "drift_ppm", math.Round(ppm))
+			in, out, disc := t.ssb.OverStats()
+			slog.Info("SSB audio", "underruns", u, "drift_ppm", math.Round(ppm),
+				"in_rate", math.Round(in), "out_rate", math.Round(out), "discarded", disc)
 			t.ssb.Stop()
 			if err := t.radio.RX(); err != nil {
 				slog.Error("TX: RX command failed", "err", err)
 			}
+			// The QMX ignores MD while it is still leaving TX (seen 2026-09-27: MD2 remained),
+			// so give it a moment; the engine also verifies the RX setting afterwards.
+			time.Sleep(150 * time.Millisecond)
 			_ = t.radio.SetMode(qmxModeDigi) // the RX path expects Digi mode
 			t.voice = false
 		} else {

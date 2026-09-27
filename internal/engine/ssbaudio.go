@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/rampa/qmx-hl2/internal/audio"
 )
@@ -27,9 +28,12 @@ type ssbAudio struct {
 	max     int // hard cap; older samples are discarded beyond it
 
 	underruns int
-	pos       float64 // fractional read position in fifo
-	ratio     float64 // input samples consumed per output sample
-	integ     float64 // PI integrator
+	// per-over accounting
+	pushed, played, discarded int
+	overStart                 time.Time
+	pos                       float64 // fractional read position in fifo
+	ratio                     float64 // input samples consumed per output sample
+	integ                     float64 // PI integrator
 
 	active bool
 	wake   chan struct{}
@@ -49,8 +53,10 @@ func (a *ssbAudio) Push(x []float32) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.fifo = append(a.fifo, x...)
+	a.pushed += len(x)
 	if over := len(a.fifo) - a.max; over > 0 {
 		a.fifo = append(a.fifo[:0], a.fifo[over:]...)
+		a.discarded += over
 	}
 }
 
@@ -66,6 +72,8 @@ func (a *ssbAudio) Reset() {
 func (a *ssbAudio) Start() {
 	a.mu.Lock()
 	a.active = true
+	a.pushed, a.played, a.discarded = 0, 0, 0
+	a.overStart = time.Now()
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
@@ -86,6 +94,18 @@ func (a *ssbAudio) isActive() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.active
+}
+
+// OverStats returns the input and output sample rates seen during the current over and the
+// number of samples discarded because the FIFO overflowed.
+func (a *ssbAudio) OverStats() (inRate, outRate float64, discarded int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	el := time.Since(a.overStart).Seconds()
+	if el <= 0 {
+		return 0, 0, a.discarded
+	}
+	return float64(a.pushed) / el, float64(a.played) / el, a.discarded
 }
 
 // Stats returns the underrun count and the estimated clock difference in ppm (the servo's
@@ -128,6 +148,7 @@ func (a *ssbAudio) fill(out []float32) {
 		f := float32(a.pos - float64(k))
 		y0, y1, y2, y3 := a.fifo[k-1], a.fifo[k], a.fifo[k+1], a.fifo[k+2]
 		out[n] = y1 + 0.5*f*(y2-y0+f*(2*y0-5*y1+4*y2-y3+f*(3*(y1-y2)+y3-y0)))
+		a.played++
 		a.pos += a.ratio
 	}
 	// Drop consumed samples, keeping one for history.
