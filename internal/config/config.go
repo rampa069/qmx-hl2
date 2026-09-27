@@ -22,10 +22,11 @@ type Config struct {
 	Verbose     bool
 
 	// One-shot modes.
-	List        bool          // list audio devices and serial ports, then exit
-	Probe       time.Duration // capture this long, report IQ levels and measured rate, then exit
-	ProbeIQMode bool          // with Probe: send Q91; first and restore the previous Q9 state after
-	ShowVersion bool
+	List          bool          // list audio devices and serial ports, then exit
+	Probe         time.Duration // capture this long, report IQ levels and measured rate, then exit
+	ProbeIQMode   bool          // with Probe: send Q91; first and restore the previous Q9 state after
+	ProbePlayback bool          // with Probe: also play silence to the QMX and measure the playback clock
+	ShowVersion   bool
 }
 
 // Parse parses args (without the program name). Errors and -h output go to out.
@@ -43,6 +44,7 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
 	fs.BoolVar(&c.ProbeIQMode, "iq", false, "with -probe: enable QMX IQ mode (Q91;) during the capture")
+	fs.BoolVar(&c.ProbePlayback, "playback", false, "with -probe: also play silence to the QMX and measure its playback clock")
 	fs.BoolVar(&c.ShowVersion, "version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return nil, err

@@ -152,6 +152,55 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 	}
 	defer capt.Close()
 
+	// Optionally play silence to the QMX and measure the playback clock the same way. Blocking
+	// writes return at the device's consumption rate once the output buffer is full.
+	type playResult struct {
+		rate, ppm  float64
+		underflows int
+		err        error
+	}
+	playDone := make(chan playResult, 1)
+	playCtx, stopPlay := context.WithCancel(ctx)
+	defer stopPlay()
+	if cfg.ProbePlayback {
+		pb, err := be.OpenPlayback(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+		if err != nil {
+			return err
+		}
+		defer pb.Close()
+		go func() {
+			var (
+				m      probe.RateMeter
+				res    playResult
+				silent = make([]float32, cfg.Frames*audio.Channels)
+				t0     = time.Now()
+				on     bool
+			)
+			for playCtx.Err() == nil {
+				err := pb.Write(silent)
+				if errors.Is(err, audio.ErrUnderflow) {
+					res.underflows++
+				} else if err != nil {
+					res.err = err
+					break
+				}
+				now := time.Now()
+				if !on {
+					if now.Sub(t0) >= time.Second {
+						m.Start(now)
+						on = true
+					}
+					continue
+				}
+				m.Add(now, cfg.Frames)
+			}
+			res.rate, res.ppm = m.Rate(cfg.SampleRate)
+			playDone <- res
+		}()
+	} else {
+		playDone <- playResult{}
+	}
+
 	buf := make([]float32, cfg.Frames*audio.Channels)
 	var (
 		total, second probe.IQStats
@@ -184,7 +233,7 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 			}
 			continue
 		}
-		meter.Add(n)
+		meter.Add(now, n)
 		total.AddInterleaved(buf, n)
 		second.AddInterleaved(buf, n)
 		if now.Sub(lastReport) >= time.Second {
@@ -193,10 +242,18 @@ func runProbe(ctx context.Context, cfg *config.Config) error {
 			lastReport = now
 		}
 	}
-	rate, ppm := meter.Rate(time.Now(), cfg.SampleRate)
+	rate, ppm := meter.Rate(cfg.SampleRate)
 	fmt.Println("summary:")
 	fmt.Printf("  %s\n", total.String())
-	fmt.Printf("  frames %d, measured rate %.2f Hz (%+.0f ppm vs host clock; run >= 60 s for drift work), overflows %d\n",
+	fmt.Printf("  frames %d, measured rate %.2f Hz (%+.1f ppm vs host clock, regression), overflows %d\n",
 		total.Frames(), rate, ppm, overflows)
+	stopPlay()
+	if pr := <-playDone; cfg.ProbePlayback {
+		if pr.err != nil {
+			return fmt.Errorf("playback: %w", pr.err)
+		}
+		fmt.Printf("  playback (silence): measured rate %.2f Hz (%+.1f ppm vs host), underflows %d; capture-playback %+.1f ppm\n",
+			pr.rate, pr.ppm, pr.underflows, ppm-pr.ppm)
+	}
 	return nil
 }

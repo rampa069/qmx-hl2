@@ -81,26 +81,45 @@ func (s *IQStats) String() string {
 }
 
 // RateMeter measures the device sample rate against the host monotonic clock.
-// Start it after the stream has settled, since the first buffers arrive in a burst.
+//
+// Each Add records (arrival time, cumulative frames). Rate is the least-squares slope of frames
+// over time, so buffer-arrival jitter averages out instead of dominating as it does with a
+// simple frames/elapsed ratio. Start it after the stream has settled, since the first buffers
+// arrive in a burst.
 type RateMeter struct {
 	start  time.Time
 	frames int64
+	// Online (Welford) regression state.
+	n                      float64
+	meanT, meanF, mTT, cTF float64
 }
 
 // Start begins a measurement at now.
-func (r *RateMeter) Start(now time.Time) { r.start = now; r.frames = 0 }
+func (r *RateMeter) Start(now time.Time) { *r = RateMeter{start: now} }
 
-// Add counts frames that arrived.
-func (r *RateMeter) Add(frames int) { r.frames += int64(frames) }
+// Add counts frames that arrived at now.
+func (r *RateMeter) Add(now time.Time, frames int) {
+	r.frames += int64(frames)
+	t := now.Sub(r.start).Seconds()
+	f := float64(r.frames)
+	r.n++
+	dt := t - r.meanT
+	r.meanT += dt / r.n
+	df := f - r.meanF
+	r.meanF += df / r.n
+	r.mTT += dt * (t - r.meanT)
+	r.cTF += dt * (f - r.meanF)
+}
 
-// Rate returns the measured frames/second and its offset from nominal in ppm.
-// Buffer-level jitter bounds the accuracy: with 5 ms buffers over 60 s it is roughly ±80 ppm,
-// so use long runs for drift measurements.
-func (r *RateMeter) Rate(now time.Time, nominal int) (rate, ppm float64) {
-	el := now.Sub(r.start).Seconds()
-	if el <= 0 {
+// Frames returns the total frames added.
+func (r *RateMeter) Frames() int64 { return r.frames }
+
+// Rate returns the regression slope in frames/second and its offset from nominal in ppm.
+// It returns zeros until there are at least two points spread over time.
+func (r *RateMeter) Rate(nominal int) (rate, ppm float64) {
+	if r.n < 2 || r.mTT <= 0 {
 		return 0, 0
 	}
-	rate = float64(r.frames) / el
+	rate = r.cTF / r.mTT
 	return rate, (rate/float64(nominal) - 1) * 1e6
 }

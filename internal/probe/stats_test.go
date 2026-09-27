@@ -45,16 +45,40 @@ func TestIQStatsEmptyAndSilent(t *testing.T) {
 	}
 }
 
-func TestRateMeter(t *testing.T) {
+func TestRateMeterRegressionIgnoresJitter(t *testing.T) {
 	var r RateMeter
 	t0 := time.Unix(1000, 0)
 	r.Start(t0)
-	r.Add(480048) // 10 s at 48000 Hz + 100 ppm
-	rate, ppm := r.Rate(t0.Add(10*time.Second), 48000)
-	if math.Abs(rate-48004.8) > 1e-6 || math.Abs(ppm-100) > 1e-6 {
-		t.Fatalf("rate=%f ppm=%f", rate, ppm)
+	// 240-frame buffers from a device running 100 ppm fast, delivered with up to +/-3 ms of
+	// alternating arrival jitter. frames/elapsed would be thrown off by the last arrival;
+	// the regression should not be.
+	const rate = 48000 * (1 + 100e-6)
+	for i := 1; i <= 12000; i++ { // 60 s
+		ideal := float64(i*240) / rate
+		jit := 0.003
+		if i%2 == 0 {
+			jit = -jit
+		}
+		r.Add(t0.Add(time.Duration((ideal+jit)*1e9)), 240)
 	}
-	if rate, _ := r.Rate(t0, 48000); rate != 0 {
-		t.Fatal("zero elapsed should give zero rate")
+	got, ppm := r.Rate(48000)
+	if math.Abs(ppm-100) > 1 {
+		t.Fatalf("rate=%f ppm=%f, want about 100 ppm", got, ppm)
+	}
+	if r.Frames() != 12000*240 {
+		t.Fatalf("frames=%d", r.Frames())
+	}
+}
+
+func TestRateMeterNeedsTwoPoints(t *testing.T) {
+	var r RateMeter
+	t0 := time.Unix(1000, 0)
+	r.Start(t0)
+	if rate, _ := r.Rate(48000); rate != 0 {
+		t.Fatal("no points should give zero rate")
+	}
+	r.Add(t0.Add(time.Second), 48000)
+	if rate, _ := r.Rate(48000); rate != 0 {
+		t.Fatal("one point should give zero rate")
 	}
 }
