@@ -374,7 +374,7 @@ func TestTXSSBStartsAtTargetAfterLongSilence(t *testing.T) {
 	h.tx.ssb = newSSBAudio(48000)
 	h.send(true, 14230000, 0, 0, 1500*time.Millisecond) // MOX with silence
 	// Voice-like two-tone.
-	frames := int(0.2 * 48000 / hpsdr.SamplesPerEP2Frm)
+	frames := 48000 / 5 / hpsdr.SamplesPerEP2Frm
 	for i := 0; i < frames; i++ {
 		var f txFrame
 		f.mox, f.txFreq = true, 14230000
