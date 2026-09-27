@@ -26,6 +26,10 @@ func (r *fakeTXRadio) Tone(hz float64) error {
 	r.log = append(r.log, fmt.Sprintf("TA%.2f", hz))
 	return nil
 }
+func (r *fakeTXRadio) SetMode(m int) error {
+	r.log = append(r.log, fmt.Sprintf("MD%d", m))
+	return nil
+}
 func (r *fakeTXRadio) SWR(context.Context) (float64, error)      { return r.swr, nil }
 func (r *fakeTXRadio) PowerOut(context.Context) (float64, error) { return 3.8, nil }
 
@@ -224,5 +228,94 @@ func TestTXMetersReported(t *testing.T) {
 	h.send(true, 14074000, 0, 0, 400*time.Millisecond)
 	if last := h.meters[len(h.meters)-1]; last != [2]float64{0, 0} {
 		t.Fatalf("gap meter %v", last)
+	}
+}
+
+func TestTXAutoVoiceUsesSSB(t *testing.T) {
+	h := newHarness(t)
+	h.tx.ssb = newSSBAudio(48000)
+	// Two-tone "voice" in USB: 700 + 1900 Hz.
+	send2 := func(d time.Duration, mox bool) {
+		frames := int(d.Seconds() * 48000 / hpsdr.SamplesPerEP2Frm)
+		for i := 0; i < frames; i++ {
+			var f txFrame
+			f.mox, f.txFreq = mox, 21300000
+			for k := range f.iq {
+				h.phase += 1
+				tt := h.phase / 48000
+				i1 := 0.4*math.Cos(2*math.Pi*700*tt) + 0.4*math.Cos(2*math.Pi*1900*tt)
+				q1 := 0.4*math.Sin(2*math.Pi*700*tt) + 0.4*math.Sin(2*math.Pi*1900*tt)
+				f.iq[k] = [2]int16{int16(i1 * 32767), int16(q1 * 32767)}
+			}
+			h.tx.frame(context.Background(), f)
+			h.clock = h.clock.Add(time.Second * hpsdr.SamplesPerEP2Frm / 48000)
+			h.tx.tick(context.Background())
+		}
+	}
+	send2(300*time.Millisecond, true)
+	want := []string{"MD2", "FA21300000", "TX"}
+	for i, w := range want {
+		if i >= len(h.radio.log) || h.radio.log[i] != w {
+			t.Fatalf("SSB key-down %v, want prefix %v", h.radio.log, want)
+		}
+	}
+	if h.radio.count("TA") != 0 {
+		t.Fatal("SSB path sent TA")
+	}
+	h.tx.ssb.mu.Lock()
+	buffered := len(h.tx.ssb.fifo)
+	h.tx.ssb.mu.Unlock()
+	if buffered < 48000*250/1000 {
+		t.Fatalf("only %d audio samples queued", buffered)
+	}
+	send2(5*time.Millisecond, false)
+	l := h.radio.log
+	if l[len(l)-2] != "RX" || l[len(l)-1] != "MD6" {
+		t.Fatalf("SSB key-up %v", l[len(l)-3:])
+	}
+	if !h.active[0] || h.active[1] {
+		t.Fatalf("active %v", h.active)
+	}
+}
+
+func TestTXAutoToneStaysTA(t *testing.T) {
+	h := newHarness(t)
+	h.tx.ssb = newSSBAudio(48000)
+	h.send(true, 21074000, 1500, 0.5, 200*time.Millisecond)
+	if h.radio.count("MD") != 0 || h.radio.count("TA1500") == 0 {
+		t.Fatalf("FT8 tone in auto mode: %v", h.radio.log)
+	}
+}
+
+func TestSSBAudioFIFO(t *testing.T) {
+	a := newSSBAudio(48000)
+	out := make([]float32, 240)
+	a.Push(make([]float32, 1000))
+	a.fill(out) // below the 60 ms target: silence, not playing
+	if a.playing {
+		t.Fatal("started before reaching target")
+	}
+	x := make([]float32, 3000) // inside the 60±20 ms band: no correction
+	for i := range x {
+		x[i] = float32(i)
+	}
+	a.Reset()
+	a.Push(x)
+	a.fill(out)
+	if !a.playing || out[0] != 0 || out[239] != 239 {
+		t.Fatalf("first chunk %v..%v playing=%v", out[0], out[239], a.playing)
+	}
+	// Overfilled: one sample dropped per chunk.
+	a.Push(make([]float32, 4000))
+	a.fill(out)
+	if d, _, _ := a.Stats(); d != 1 {
+		t.Fatalf("drops = %d", d)
+	}
+	// Drain to underrun.
+	for i := 0; i < 100; i++ {
+		a.fill(out)
+	}
+	if _, _, u := a.Stats(); u != 1 || a.playing {
+		t.Fatalf("underruns=%d playing=%v", u, a.playing)
 	}
 }

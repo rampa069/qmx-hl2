@@ -146,6 +146,9 @@ func (p *paPlayback) Write(src []float32) error {
 	return nil
 }
 
+func (p *paPlayback) Pause() error  { return p.stream.Stop() }
+func (p *paPlayback) Resume() error { return p.stream.Start() }
+
 func (p *paPlayback) Close() error {
 	_ = p.stream.Stop()
 	return p.stream.Close()

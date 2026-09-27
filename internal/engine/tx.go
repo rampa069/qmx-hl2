@@ -20,6 +20,7 @@ type TXRadio interface {
 	TX() error
 	RX() error
 	Tone(hz float64) error
+	SetMode(m int) error
 	SWR(ctx context.Context) (float64, error)
 	PowerOut(ctx context.Context) (float64, error)
 }
@@ -47,6 +48,12 @@ type TXConfig struct {
 	// (the QMX reports a large transient at key-down).
 	SWRMax   float64
 	SWRGrace time.Duration
+	// Mode selects the transmit path: "tone" (CAT TA only), "ssb" (QMX SSB mode fed with USB
+	// audio) or "auto" (decide per over from the first 20-150 ms of TX IQ). SSB needs a
+	// playback stream to the QMX.
+	Mode string
+	// SSBGain scales the SSB audio (1.0 = the client's TX IQ amplitude as is).
+	SSBGain float64
 	// SwapIQ exchanges the host's TX I and Q words. HPSDR clients send TX I/Q "reversed
 	// relative to receive" (USB protocol doc); with Zeus on 2026-09-27 an FT8 tone at +1500 Hz
 	// arrived as -1500 Hz unswapped, so the default is true.
@@ -61,6 +68,7 @@ func DefaultTXConfig() TXConfig {
 		Starve: 150 * time.Millisecond, MaxTX: 3 * time.Minute,
 		SWRMax: 3.0, SWRGrace: 600 * time.Millisecond,
 		SwapIQ: true,
+		Mode:   "auto", SSBGain: 1.0,
 	}
 }
 
@@ -107,7 +115,13 @@ type transmitter struct {
 	statMaxLevel            float64
 	statRawWatts            float64
 	keyed                   atomic.Bool // read by meterLoop
-	dump                    io.Writer   // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
+
+	cls     *classifier
+	pending []float32 // SSB audio captured while classifying
+	voice   bool      // current over uses the SSB path
+	ssb     *ssbAudio // nil when no playback stream (tone only)
+	scratch []float32
+	dump    io.Writer // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
 }
 
 func newTransmitter(cfg TXConfig, radio TXRadio, active func(bool)) *transmitter {
@@ -127,6 +141,7 @@ func newTransmitter(cfg TXConfig, radio TXRadio, active func(bool)) *transmitter
 		now:    time.Now,
 		active: active,
 		tr:     dsp.NewToneTracker(hpsdr.TXSampleRate, cfg.Window),
+		cls:    newClassifier(cfg.GateLevel),
 	}
 }
 
@@ -239,16 +254,34 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	case txIdle:
 		t.state = txArming
 		t.tr.Reset()
+		t.cls.reset()
+		t.pending = t.pending[:0]
+		t.voice = false
 		t.statMaxLevel = 0
 		t.armedFreq = f.txFreq
 		slog.Info("TX requested by host", "tx_freq", f.txFreq)
 	}
+	t.scratch = t.scratch[:0]
 	for _, s := range f.iq {
 		i, q := float64(s[0])/32768, float64(s[1])/32768
 		if t.cfg.SwapIQ {
 			i, q = q, i
 		}
-		t.tr.Add(complex(i, q))
+		x := complex(i, q)
+		t.tr.Add(x)
+		if t.state == txArming {
+			t.cls.add(x)
+		}
+		// The real part of the analytic signal is the audio; the QMX's SSB modulator picks
+		// the sideband, so the same audio serves USB and LSB.
+		t.scratch = append(t.scratch, float32(clamp1(i*t.cfg.SSBGain)))
+	}
+	if t.state == txArming && t.ssb != nil {
+		t.pending = append(t.pending, t.scratch...)
+	}
+	if t.state == txOn && t.voice {
+		t.ssb.Push(t.scratch)
+		return
 	}
 	if !t.tr.Ready() {
 		return
@@ -262,6 +295,27 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	case txArming:
 		if !signal {
 			return // MOX without audio yet (e.g. WSJT-X keys PTT before the tones)
+		}
+		kind := txTone
+		switch t.cfg.Mode {
+		case "ssb":
+			kind = txVoice
+		case "auto":
+			if t.ssb != nil {
+				kind = t.cls.decide()
+			}
+		}
+		switch kind {
+		case txUndecided:
+			if len(t.pending) > hpsdr.TXSampleRate/4 { // should not happen: decide() settles by 150 ms
+				kind = txVoice
+			} else {
+				return
+			}
+		}
+		if kind == txVoice && t.ssb != nil {
+			t.keyDownSSB(f.txFreq, now)
+			return
 		}
 		t.keyDown(f.txFreq, freq, now)
 	case txOn:
@@ -298,6 +352,47 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 	}
 	slog.Info("TX on", "dial", t.dial, "tone", float64(txFreq)+bb-float64(t.dial))
 	t.follow(txFreq, bb, true, now)
+}
+
+// keyDownSSB transmits the client's audio through the QMX's SSB modulator.
+func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time) {
+	usb := t.cls.upperSideband()
+	mode, name := qmxModeUSB, "USB"
+	if !usb {
+		mode, name = qmxModeLSB, "LSB"
+	}
+	t.dial = txFreq
+	for _, step := range []func() error{
+		func() error { return t.radio.SetMode(mode) },
+		func() error { return t.radio.SetFreqA(t.dial) },
+		func() error { return t.radio.TX() },
+	} {
+		if err := step(); err != nil {
+			slog.Error("TX (SSB): CAT failed", "err", err)
+			_ = t.radio.SetMode(qmxModeDigi)
+			t.state = txInhibit
+			return
+		}
+	}
+	t.ssb.Reset()
+	t.ssb.Push(t.pending)
+	t.ssb.Start()
+	t.pending = t.pending[:0]
+	t.voice = true
+	t.toneOn = true // meters show real power
+	t.state = txOn
+	t.keyed.Store(true)
+	t.statKeyDowns, t.statTones, t.statRawWatts = 1, 0, 0
+	t.onSince = now
+	t.highSWR = 0
+	if t.active != nil {
+		t.active(true)
+	}
+	slog.Info("TX on (SSB)", "dial", t.dial, "sideband", name)
+}
+
+func clamp1(v float64) float64 {
+	return math.Max(-1, math.Min(1, v))
 }
 
 func (t *transmitter) follow(txFreq uint32, bb float64, signal bool, now time.Time) {
@@ -356,7 +451,7 @@ func (t *transmitter) tick(ctx context.Context) {
 		return
 	}
 	// During silent gaps the QMX is already back in RX (TA0 ends TX), so there is nothing to
-	// keep alive.
+	// keep alive. In SSB the meter queries (every 300 ms) keep the QMX CAT watchdog fed.
 }
 
 // abort keys up and ignores MOX until the host releases it.
@@ -370,9 +465,18 @@ func (t *transmitter) keyUp(reason string) {
 	t.state = txIdle
 	t.keyed.Store(false)
 	if was == txOn {
-		_ = t.radio.Tone(0)
-		if err := t.radio.RX(); err != nil {
-			slog.Error("TX: RX command failed", "err", err)
+		if t.voice {
+			t.ssb.Stop()
+			if err := t.radio.RX(); err != nil {
+				slog.Error("TX: RX command failed", "err", err)
+			}
+			_ = t.radio.SetMode(qmxModeDigi) // the RX path expects Digi mode
+			t.voice = false
+		} else {
+			_ = t.radio.Tone(0)
+			if err := t.radio.RX(); err != nil {
+				slog.Error("TX: RX command failed", "err", err)
+			}
 		}
 		t.toneOn = false
 		slog.Info("TX off", "reason", reason, "duration", t.now().Sub(t.onSince).Round(time.Millisecond),
@@ -385,3 +489,10 @@ func (t *transmitter) keyUp(reason string) {
 		slog.Info("TX request ended", "reason", reason)
 	}
 }
+
+// QMX MD values (kept local so tests need not import the qmx package).
+const (
+	qmxModeLSB  = 1
+	qmxModeUSB  = 2
+	qmxModeDigi = 6
+)

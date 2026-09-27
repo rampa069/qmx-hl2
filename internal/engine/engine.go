@@ -80,7 +80,8 @@ type Engine struct {
 	txWatts   float64 // last QMX power/SWR reading while keyed, for EP6 telemetry
 	txSWR     float64
 
-	tune chan struct{}
+	tune     chan struct{}
+	playback audio.PlaybackStream
 }
 
 // New creates an engine. The capture stream must be open and delivering stereo IQ.
@@ -102,6 +103,15 @@ func New(cfg Config, cat *qmx.Client, capt audio.CaptureStream, out Sender) *Eng
 		}
 	}
 	return e
+}
+
+// SetPlayback gives the engine a stream to the QMX's USB audio input, enabling the SSB
+// transmit path. Call before Run.
+func (e *Engine) SetPlayback(pb audio.PlaybackStream) {
+	e.playback = pb
+	if e.tx != nil && pb != nil {
+		e.tx.ssb = newSSBAudio(e.cfg.SampleRate)
+	}
 }
 
 func (e *Engine) setTXActive(on bool) {
@@ -202,6 +212,10 @@ func (e *Engine) Run(ctx context.Context) error {
 		// The transmitter keys up on shutdown before restore runs.
 		wg.Add(1)
 		go func() { defer wg.Done(); e.tx.run(ctx) }()
+		if e.tx.ssb != nil {
+			wg.Add(1)
+			go func() { defer wg.Done(); e.tx.ssb.run(ctx, e.playback, e.cfg.Frames) }()
+		}
 	}
 	err = e.captureLoop(ctx)
 	cancel()
@@ -229,6 +243,17 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 			orig[c] = r
 		}
 		keys = append(keys, "QC", "QB")
+		if e.tx.ssb != nil {
+			r, err := e.cat.Query(ctx, "SS;")
+			if err != nil {
+				return nil, fmt.Errorf("read QMX SS: %w", err)
+			}
+			orig["SS"] = r
+			keys = append(keys, "SS")
+			if err := e.cat.Set("SS0;"); err != nil { // SSB audio from USB
+				return nil, err
+			}
+		}
 		// If the daemon dies mid-transmission, the QMX drops TX after 3 s without CAT.
 		if err := e.cat.SetCATTimeout(true, 3); err != nil {
 			return nil, err

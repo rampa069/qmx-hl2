@@ -43,6 +43,10 @@ type CaptureStream interface {
 type PlaybackStream interface {
 	// Write plays interleaved stereo frames. len(src) must be a multiple of Channels.
 	Write(src []float32) error
+	// Pause stops the stream so the device sees no audio at all (not just silence);
+	// Resume restarts it. The QMX ignores CAT TA tones while USB audio is streaming.
+	Pause() error
+	Resume() error
 	Close() error
 }
 

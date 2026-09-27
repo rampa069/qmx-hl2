@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -299,6 +300,8 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		ecfg.MirrorOutput = !ecfg.MirrorOutput
 	}
 	ecfg.TX.Enabled = cfg.TX
+	ecfg.TX.Mode = cfg.TXMode
+	ecfg.TX.SSBGain = math.Pow(10, cfg.SSBGain/20)
 	if cfg.TXSwapIQ {
 		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ
 	}
@@ -313,6 +316,14 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	// The engine sends through the server's socket, and the server calls the engine.
 	var srv *hpsdr.Server
 	eng := engine.New(ecfg, cat, capt, senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) }))
+	if cfg.TX && cfg.TXMode != "tone" {
+		pb, err := be.OpenPlayback(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+		if err != nil {
+			return fmt.Errorf("SSB transmit needs QMX audio playback: %w", err)
+		}
+		defer pb.Close()
+		eng.SetPlayback(pb)
+	}
 	srv, err = hpsdr.NewServer(id, eng, cfg.Watchdog)
 	if err != nil {
 		return err
@@ -322,7 +333,7 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	}
 	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s) with QMX on %s; Ctrl-C to stop\n", srv.LocalAddr(), id.MAC, dev)
 	if cfg.TX {
-		fmt.Println("TX ENABLED: the QMX transmits when the client keys MOX (single-tone modes: FT8/FT4/WSPR/JS8/RTTY/CW)")
+		fmt.Printf("TX ENABLED (mode %s): the QMX transmits when the client keys MOX\n", cfg.TXMode)
 	} else {
 		fmt.Println("receive only (start with -tx to allow transmitting)")
 	}

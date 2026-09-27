@@ -29,6 +29,8 @@ type Config struct {
 	SwapIQ   bool          // swap I and Q if the spectrum appears mirrored
 	TX       bool          // allow the QMX to transmit when the client keys MOX
 	TXSwapIQ bool          // swap the host's TX I and Q words
+	TXMode   string        // auto, tone or ssb
+	SSBGain  float64       // dB applied to SSB transmit audio
 
 	// One-shot modes.
 	List          bool          // list audio devices and serial ports, then exit
@@ -57,6 +59,8 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.BoolVar(&c.SwapIQ, "swapiq", false, "invert the RX spectrum convention sent to the client (use if signals appear mirrored around the centre)")
 	fs.BoolVar(&c.TX, "tx", false, "enable transmit: key the QMX (Digi tone via CAT TA) when the client sends MOX")
 	fs.BoolVar(&c.TXSwapIQ, "txswapiq", false, "invert the TX I/Q convention (use if transmitted tones come out mirrored around the dial)")
+	fs.StringVar(&c.TXMode, "txmode", "auto", "transmit path: auto (tone for FT8/CW, SSB for voice), tone, or ssb")
+	fs.Float64Var(&c.SSBGain, "ssbgain", 0, "gain in dB for SSB transmit audio sent to the QMX")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
 	fs.BoolVar(&c.ProbeIQMode, "iq", false, "with -probe: enable QMX IQ mode (Q91;) during the capture")
@@ -70,6 +74,11 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	}
 	if c.SampleRate <= 0 || c.Frames <= 0 {
 		return nil, fmt.Errorf("-rate and -frames must be positive")
+	}
+	switch c.TXMode {
+	case "auto", "tone", "ssb":
+	default:
+		return nil, fmt.Errorf("-txmode must be auto, tone or ssb")
 	}
 	if c.Watchdog < 0 {
 		return nil, fmt.Errorf("-watchdog must not be negative")
