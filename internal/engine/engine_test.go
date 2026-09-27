@@ -70,12 +70,17 @@ type fakeCapture struct {
 	frames int
 	toneHz float64
 	n      int
+	speed  float64 // >1 delivers frames faster than real time (0 = 1)
 }
 
 func (c *fakeCapture) FramesPerBuffer() int { return c.frames }
 func (c *fakeCapture) Close() error         { return nil }
 func (c *fakeCapture) Read(dst []float32) (int, error) {
-	time.Sleep(time.Duration(c.frames) * time.Second / 48000)
+	sp := c.speed
+	if sp == 0 {
+		sp = 1
+	}
+	time.Sleep(time.Duration(float64(c.frames) * float64(time.Second) / 48000 / sp))
 	for i := 0; i < c.frames; i++ {
 		ph := 2 * math.Pi * c.toneHz * float64(c.n) / 48000
 		dst[2*i] = float32(0.5 * math.Cos(ph))
@@ -369,5 +374,58 @@ func TestEngineLOOffsetAndNoiseFill(t *testing.T) {
 	}
 	if e2 == 0 {
 		t.Error("no noise fill outside the QMX band")
+	}
+}
+
+// With SSB audio playing, the real QMX capture runs ~1.1% fast; EP6 must not follow it while
+// transmitting, or the client sends 1.1% too much TX audio.
+func TestEngineEP6PacedByClockDuringTX(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["QB"], cat.state["QC"] = "QB1;", "QC120;"
+	cat.state["SW"], cat.state["PC"] = "SW120;", "PC38;"
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	cfg.TX.SwapIQ = false
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	out := &capSender{}
+	e := New(cfg, client, &fakeCapture{frames: 240, speed: 1.011}, out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{14074000, 0x04})) // 48k, 1 RX
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	waitFor(t, func() bool { return cat.get("FA") == "FA00014086000;" }, "RX tune")
+
+	var ph float64
+	stop := make(chan struct{})
+	go func() { // keep MOX with a tone flowing
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			e.EP2(ep2Tone(true, 1500, &ph))
+			time.Sleep(2625 * time.Microsecond)
+		}
+	}()
+	waitFor(t, func() bool { return strings.HasPrefix(cat.get("TA"), "TA1500") }, "TX on")
+	time.Sleep(200 * time.Millisecond)
+	out.take()
+	t0 := time.Now()
+	time.Sleep(2 * time.Second)
+	n := len(out.take())
+	el := time.Since(t0).Seconds()
+	close(stop)
+	cancel()
+	<-done
+	rate := float64(n) / el
+	// 48 kHz / 126 = 381 packets/s; following the fast capture would give ~385.
+	if rate > 381*1.006 || rate < 381*0.97 {
+		t.Errorf("EP6 during TX: %.1f packets/s, want about 381", rate)
 	}
 }

@@ -436,6 +436,15 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		rateT0           = time.Now()
 		rateEP2, rateEP6 int64
 		rateFrames       int64
+		// rxRate is the QMX capture rate measured while receiving. While transmitting,
+		// EP6 is paced from the wall clock at this rate instead of from capture: with USB
+		// audio playing to the QMX (SSB), its capture stream runs about 1.1% fast
+		// (48552 vs 48008 frames/s, 2026-09-27), and clients pace their TX audio off EP6.
+		rxRate    = float64(e.cfg.SampleRate)
+		wasTX     bool
+		vT0       time.Time
+		vProduced int64
+		rateWasTX bool
 	)
 	send := func(pkt []byte) {
 		e.ep6Count.Add(1)
@@ -484,9 +493,15 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		e.capFrames.Add(int64(n))
 		if el := time.Since(rateT0).Seconds(); el >= 30 {
 			e2, e6 := e.ep2Count.Load(), e.ep6Count.Load()
-			slog.Debug("packet rates", "qmx_frames_s", math.Round(float64(rateFrames)/el),
+			r := float64(rateFrames) / el
+			slog.Debug("packet rates", "qmx_frames_s", math.Round(r),
 				"ep6_s", math.Round(float64(e6-rateEP6)/el*10)/10, "ep2_s", math.Round(float64(e2-rateEP2)/el*10)/10)
+			// Only trust windows spent entirely in receive, and only plausible values.
+			if !rateWasTX && math.Abs(r/float64(e.cfg.SampleRate)-1) < 0.002 {
+				rxRate = r
+			}
 			rateT0, rateEP2, rateEP6, rateFrames = time.Now(), e2, e6, 0
+			rateWasTX = false
 		}
 		if e.cfg.IQBalance && time.Since(lastBal) > time.Minute {
 			lastBal = time.Now()
@@ -540,6 +555,30 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		}
 
 		L := interp.L
+		if transmitting {
+			rateWasTX = true
+			// Pace EP6 from the wall clock at rxRate (the IQ is muted anyway).
+			if !wasTX {
+				vT0, vProduced = now, 0
+			}
+			wasTX = true
+			want := int64(now.Sub(vT0).Seconds() * rxRate)
+			m := max(0, min(want-vProduced, int64(2*len(xs))))
+			vProduced += m
+			for i := int64(0); i < m; i++ {
+				interp.Process(0, up)
+				for k := 0; k < L; k++ {
+					for r := range ncos {
+						round[r] = hpsdr.IQ24{}
+					}
+					builder.AddRound(round)
+				}
+			}
+			builder.SetTelemetry(hpsdr.Telemetry{Overload: overload, Temp: hpsdr.TempRaw(30), TXFIFO: 16,
+				FwdPower: hpsdr.PowerRaw(watts), RevPower: hpsdr.ReversePowerRaw(watts, swr)})
+			continue
+		}
+		wasTX = false
 		// Fill noise: 10 dB below the QMX floor density, spread over the whole output band.
 		// Per component: sigma^2 = floor * L * 0.1 / 2.
 		sigma := 0.0
