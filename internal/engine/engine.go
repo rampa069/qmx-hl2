@@ -118,6 +118,8 @@ func (e *Engine) EP2(pkt []byte) {
 			if e.state.RX1Freq() != oldRX1 {
 				retune = true
 			}
+			slog.Debug("host register", "addr", fmt.Sprintf("0x%02x", f.CC.Addr), "data", fmt.Sprintf("0x%08x", f.CC.Data),
+				"tx", e.state.TXFreq, "rx1", e.state.RXFreq[0], "duplex", e.state.Duplex, "rate", e.state.SampleRate, "nrx", e.state.Receivers)
 		}
 		if f.CC.RQST {
 			e.acks = append(e.acks, f.CC)
