@@ -5,3 +5,9 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Go build outputs and local artifacts
+/qmx-hl2
+/qmx-hl2-*
+/deps/
+/logs/
