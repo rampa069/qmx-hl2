@@ -96,6 +96,11 @@ type Engine struct {
 	playback audio.PlaybackStream
 
 	ep2Count, ep6Count atomic.Int64 // packet counters for the rate log
+	capFrames          atomic.Int64 // QMX frames captured
+
+	// counters at key-down, for the per-over rate log
+	txT0                time.Time
+	txEP2, txEP6, txCap int64
 }
 
 // New creates an engine. The capture stream must be open and delivering stereo IQ.
@@ -129,6 +134,18 @@ func (e *Engine) SetPlayback(pb audio.PlaybackStream) {
 }
 
 func (e *Engine) setTXActive(on bool) {
+	if on {
+		e.txT0 = time.Now()
+		e.txEP2, e.txEP6, e.txCap = e.ep2Count.Load(), e.ep6Count.Load(), e.capFrames.Load()
+	} else if el := time.Since(e.txT0).Seconds(); el > 0 {
+		// Clients pace EP2 off our EP6, so a change in EP6 while keyed changes the TX
+		// audio rate they deliver. Compare with the RX "packet rates" log.
+		slog.Info("TX packet rates",
+			"qmx_frames_s", math.Round(float64(e.capFrames.Load()-e.txCap)/el),
+			"ep6_s", math.Round(float64(e.ep6Count.Load()-e.txEP6)/el*10)/10,
+			"ep2_s", math.Round(float64(e.ep2Count.Load()-e.txEP2)/el*10)/10,
+			"seconds", math.Round(el*10)/10)
+	}
 	e.mu.Lock()
 	e.txActive = on
 	if !on {
@@ -464,6 +481,7 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 			floor.add(pow / float64(n))
 		}
 		rateFrames += int64(n)
+		e.capFrames.Add(int64(n))
 		if el := time.Since(rateT0).Seconds(); el >= 30 {
 			e2, e6 := e.ep2Count.Load(), e.ep6Count.Load()
 			slog.Debug("packet rates", "qmx_frames_s", math.Round(float64(rateFrames)/el),
