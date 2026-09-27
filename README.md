@@ -29,7 +29,7 @@ built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 | Linux x86-64 | tested (Debian 13) |
 | macOS | builds; used for development |
 | Raspberry Pi (Linux arm64) | builds; not yet tested on hardware |
-| Windows x86-64 | builds; not yet tested |
+| Windows x86-64 | tested |
 
 ## How it works
 
