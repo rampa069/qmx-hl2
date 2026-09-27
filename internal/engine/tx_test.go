@@ -163,8 +163,9 @@ func TestTXGapKeysUpToneButStaysInTX(t *testing.T) {
 	if f := lastTone(h.radio.log); math.Abs(f-1600) > 0.5 {
 		t.Fatalf("tone %g", f)
 	}
-	if h.radio.count("TX") != 1 {
-		t.Fatal("re-keyed")
+	// TA0 drops the QMX to RX, so the next element re-sends TX.
+	if h.radio.count("TX") != 2 {
+		t.Fatalf("TX sent %d times, want 2", h.radio.count("TX"))
 	}
 }
 

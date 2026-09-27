@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+	"encoding/binary"
+	"io"
 	"log/slog"
 	"math"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -99,11 +102,25 @@ type transmitter struct {
 	armedFreq uint32
 
 	lastPower, lastSWRVal float64
-	keyed                 atomic.Bool // read by meterLoop
+	// per-transmission statistics, logged at key-up
+	statKeyDowns, statTones int
+	statMaxLevel            float64
+	statRawWatts            float64
+	keyed                   atomic.Bool // read by meterLoop
+	dump                    io.Writer   // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
 }
 
 func newTransmitter(cfg TXConfig, radio TXRadio, active func(bool)) *transmitter {
+	var dump io.Writer
+	// Debug aid: QMXHL2_TXDUMP=/path records the host's TX IQ while MOX is set.
+	if path := os.Getenv("QMXHL2_TXDUMP"); path != "" {
+		if f, err := os.Create(path); err == nil {
+			dump = f
+			slog.Warn("dumping TX IQ", "path", path)
+		}
+	}
 	return &transmitter{
+		dump:   dump,
 		cfg:    cfg,
 		radio:  radio,
 		frames: make(chan txFrame, 256),
@@ -177,6 +194,9 @@ func (t *transmitter) onMeter(r meterReading) {
 		return
 	}
 	watts, swr := r.watts, r.swr
+	if watts > t.statRawWatts {
+		t.statRawWatts = watts
+	}
 	if !t.toneOn {
 		watts, swr = 0, 0
 	}
@@ -208,12 +228,18 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		return
 	}
 	t.lastMox = now
+	if t.dump != nil {
+		for _, v := range f.iq {
+			_ = binary.Write(t.dump, binary.LittleEndian, v)
+		}
+	}
 	switch t.state {
 	case txInhibit:
 		return
 	case txIdle:
 		t.state = txArming
 		t.tr.Reset()
+		t.statMaxLevel = 0
 		t.armedFreq = f.txFreq
 		slog.Info("TX requested by host", "tx_freq", f.txFreq)
 	}
@@ -226,6 +252,9 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	}
 	if !t.tr.Ready() {
 		return
+	}
+	if l := t.tr.Level(); l > t.statMaxLevel {
+		t.statMaxLevel = l
 	}
 	signal := t.tr.Level() >= t.cfg.GateLevel
 	freq := t.tr.Freq()
@@ -260,6 +289,7 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 	}
 	t.state = txOn
 	t.keyed.Store(true)
+	t.statKeyDowns, t.statTones, t.statRawWatts = 0, 0, 0
 	t.onSince = now
 	t.highSWR = 0
 	t.toneOn = false
@@ -273,7 +303,9 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 func (t *transmitter) follow(txFreq uint32, bb float64, signal bool, now time.Time) {
 	if !signal {
 		if t.toneOn {
-			_ = t.radio.Tone(0) // shaped key-up; the QMX stays in TX
+			// Shaped key-up. Bench 2026-09-27: TA0 also returns the QMX to RX (TQ0), so the
+			// next element must send TX again.
+			_ = t.radio.Tone(0)
 			t.toneOn = false
 		}
 		return
@@ -285,6 +317,17 @@ func (t *transmitter) follow(txFreq uint32, bb float64, signal bool, now time.Ti
 		return
 	}
 	if !t.toneOn || math.Abs(tone-t.lastTone) >= 0.05 || now.Sub(t.lastSent) >= 250*time.Millisecond {
+		if !t.toneOn {
+			t.statKeyDowns++
+			if t.statKeyDowns > 1 { // keyDown already sent TX for the first element
+				if err := t.radio.TX(); err != nil {
+					slog.Error("TX: re-key failed", "err", err)
+					t.abort("CAT error")
+					return
+				}
+			}
+		}
+		t.statTones++
 		if err := t.radio.Tone(tone); err != nil {
 			slog.Error("TX: tone failed", "err", err)
 			t.abort("CAT error")
@@ -312,11 +355,8 @@ func (t *transmitter) tick(ctx context.Context) {
 		t.abort("maximum TX time")
 		return
 	}
-	// Keep the QMX CAT watchdog fed even during long silent gaps.
-	if !t.toneOn && now.Sub(t.lastSent) >= 250*time.Millisecond {
-		_ = t.radio.Tone(0)
-		t.lastSent = now
-	}
+	// During silent gaps the QMX is already back in RX (TA0 ends TX), so there is nothing to
+	// keep alive.
 }
 
 // abort keys up and ignores MOX until the host releases it.
@@ -335,7 +375,9 @@ func (t *transmitter) keyUp(reason string) {
 			slog.Error("TX: RX command failed", "err", err)
 		}
 		t.toneOn = false
-		slog.Info("TX off", "reason", reason, "duration", t.now().Sub(t.onSince).Round(time.Millisecond))
+		slog.Info("TX off", "reason", reason, "duration", t.now().Sub(t.onSince).Round(time.Millisecond),
+			"key_downs", t.statKeyDowns, "tone_cmds", t.statTones, "max_level", math.Round(t.statMaxLevel*1000)/1000,
+			"max_qmx_watts", t.statRawWatts)
 		if t.active != nil {
 			t.active(false)
 		}
