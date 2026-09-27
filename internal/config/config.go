@@ -54,7 +54,7 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.StringVar(&c.MAC, "mac", "00:1c:c0:a2:51:4d", "MAC address reported in discovery replies")
 	fs.DurationVar(&c.Watchdog, "watchdog", 12*time.Second, "stop streaming after this long without packets from the client (0 disables)")
 	fs.Float64Var(&c.RXGainDB, "rxgain", 0, "digital gain in dB applied to the QMX IQ")
-	fs.BoolVar(&c.SwapIQ, "swapiq", false, "swap I and Q (if the spectrum appears mirrored)")
+	fs.BoolVar(&c.SwapIQ, "swapiq", false, "invert the RX spectrum convention sent to the client (use if signals appear mirrored around the centre)")
 	fs.BoolVar(&c.TX, "tx", false, "enable transmit: key the QMX (Digi tone via CAT TA) when the client sends MOX")
 	fs.BoolVar(&c.TXSwapIQ, "txswapiq", false, "invert the TX I/Q convention (use if transmitted tones come out mirrored around the dial)")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")

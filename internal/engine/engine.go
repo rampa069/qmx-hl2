@@ -34,16 +34,21 @@ type Config struct {
 	// IQSettle is how long IQ is muted after enabling IQ mode (the ADC path shows a large
 	// decaying transient, bench 2026-09-27).
 	IQSettle time.Duration
-	// SwapIQ exchanges the channels (use if the spectrum shows up mirrored). The bench and
-	// third-party code say left = I, but on-air orientation is not yet verified.
+	// SwapIQ exchanges the QMX channels at the input. Bench and third-party code say
+	// left = I, and FT8 cross-checks confirm it, so this stays false.
 	SwapIQ bool
+	// MirrorOutput sends the conjugate spectrum to the client. HPSDR clients (Zeus, and per
+	// the user any client) expect EP6 IQ mirrored relative to the textbook I + jQ convention,
+	// just as their TX IQ arrives mirrored: with a real HL2 they are right-way-up, while the
+	// unmirrored emulator output showed FT8 reflected around the RX1 centre (2026-09-27).
+	MirrorOutput bool
 
 	TX TXConfig
 }
 
 // DefaultConfig returns bench-derived defaults.
 func DefaultConfig() Config {
-	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second, TX: DefaultTXConfig()}
+	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second, MirrorOutput: true, TX: DefaultTXConfig()}
 }
 
 // Sender transmits an EP6 packet to the client.
@@ -421,7 +426,11 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 			for k := 0; k < L; k++ {
 				for r, nco := range ncos {
 					y := nco.Mix(up[k])
-					round[r] = hpsdr.IQ24{I: to24(real(y)), Q: to24(imag(y))}
+					q := imag(y)
+					if e.cfg.MirrorOutput {
+						q = -q
+					}
+					round[r] = hpsdr.IQ24{I: to24(real(y)), Q: to24(q)}
 				}
 				builder.AddRound(round)
 			}

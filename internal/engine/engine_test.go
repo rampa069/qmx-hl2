@@ -200,14 +200,16 @@ func TestEngineStreamsShiftedReceivers(t *testing.T) {
 		t.Errorf("sent to %v", out.to)
 	}
 	// The QMX tone at IQ +3000 Hz is RF 14.077 MHz: +3000 Hz for RX1 and +1000 Hz for RX2.
+	// The output follows the HPSDR convention (mirrored), so decoded as I + jQ the tones
+	// sit at -3000 and -1000 Hz.
 	rx1, rx2 := decode(pkts, 2, 0), decode(pkts, 2, 1)
-	if a := toneAt(rx1, 3000, 192000); a < 0.45 {
-		t.Errorf("RX1 tone at +3000: %g", a)
+	if a := toneAt(rx1, -3000, 192000); a < 0.45 {
+		t.Errorf("RX1 tone at -3000: %g", a)
 	}
-	if a := toneAt(rx2, 1000, 192000); a < 0.45 {
-		t.Errorf("RX2 tone at +1000: %g", a)
+	if a := toneAt(rx2, -1000, 192000); a < 0.45 {
+		t.Errorf("RX2 tone at -1000: %g", a)
 	}
-	if a := toneAt(rx2, 3000, 192000); a > 0.01 {
+	if a := toneAt(rx2, -3000, 192000); a > 0.01 {
 		t.Errorf("RX2 has the unshifted tone: %g", a)
 	}
 

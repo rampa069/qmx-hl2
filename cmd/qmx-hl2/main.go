@@ -295,7 +295,9 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.SampleRate = cfg.SampleRate
 	ecfg.Frames = cfg.Frames
 	ecfg.RXGainDB = cfg.RXGainDB
-	ecfg.SwapIQ = cfg.SwapIQ
+	if cfg.SwapIQ {
+		ecfg.MirrorOutput = !ecfg.MirrorOutput
+	}
 	ecfg.TX.Enabled = cfg.TX
 	if cfg.TXSwapIQ {
 		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ
