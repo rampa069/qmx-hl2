@@ -20,7 +20,7 @@ built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 |---|---|
 | Discovery as a Hermes-Lite 2 | works |
 | RX spectrum/waterfall at 48/96/192/384 kHz | works (the QMX itself covers 48 kHz) |
-| FT8 / FT4 / WSPR / JS8 / RTTY transmit | works: complete FT8 QSOs, spots on PSK Reporter |
+| FT8 / FT4 / WSPR / JS8 transmit | works: complete FT8 QSOs, spots on PSK Reporter |
 | CW transmit | works (client-generated CW keyed through the QMX) |
 | SSB voice transmit | works |
 | SSTV transmit | works: pictures received straight by remote stations |
@@ -49,15 +49,17 @@ noise.
 **Transmit** (only with `-tx`). The client's transmit I/Q is inspected at the start of each
 transmission:
 
-- **Single tone** (FT8, FT4, WSPR, JS8, RTTY, CW): the daemon tracks the instantaneous frequency
+- **Single tone** (FT8, FT4, WSPR, JS8, CW, TUNE): the daemon tracks the instantaneous frequency
   and sends it to the QMX with the CAT tone command (`TA`). The QMX stays in Digi mode and
   generates a clean, keyed carrier at exactly the right frequency.
-- **Anything else** (voice, SSTV, PSK, two-tone): the QMX is switched to USB or LSB with USB
+- **Anything else** (voice, SSTV, FreeDV, PSK, RTTY, two-tone): the QMX is switched to USB or LSB with USB
   audio as the source. During the over the client's TX pacing is locked to the QMX's playback
   clock, so its audio goes through a small buffer at a constant delay, without resampling
   (SSTV pictures stay straight).
 - **AM**: the QMX cannot transmit AM. An AM over starts out as a plain carrier (like a TUNE);
   once the modulation shows, it is moved to USB, so the voice goes out without the carrier.
+  Likewise an over that starts as a steady tone but then shifts by more than 75 Hz (RTTY's
+  mark/space, MFSK) moves to SSB, since `TA` cannot follow its short bits cleanly.
 
 The receive and transmit sideband conventions follow what HPSDR clients expect from real
 hardware, and the RX dial and Digi mode are restored after every transmission.

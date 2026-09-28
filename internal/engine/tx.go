@@ -132,9 +132,14 @@ type transmitter struct {
 	// SSB (2026-09-27/28).
 	armSignal int
 	am        amDetector // AM over going out as a tone: switch it to SSB
-	dcX, dcY  float64    // DC blocker on the SSB audio (an AM carrier is DC in it)
-	voice     bool       // current over uses the SSB path
-	ssb       *ssbAudio  // nil when no playback stream (tone only)
+	// A tone over whose frequency moves away from where it started is FSK with a wide shift
+	// (RTTY) or MFSK, which CAT TA cannot follow cleanly: switch it to SSB.
+	baseFreq  float64
+	baseSet   bool
+	excursion int       // consecutive samples with signal away from baseFreq
+	dcX, dcY  float64   // DC blocker on the SSB audio (an AM carrier is DC in it)
+	voice     bool      // current over uses the SSB path
+	ssb       *ssbAudio // nil when no playback stream (tone only)
 	scratch   []float32
 	dump      io.Writer // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
 }
@@ -273,6 +278,7 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		t.pending = t.pending[:0]
 		t.armSignal = 0
 		t.am.reset()
+		t.baseSet, t.excursion = false, 0
 		t.dcX, t.dcY = 0, 0
 		t.voice = false
 		t.statMaxLevel = 0
@@ -352,9 +358,30 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		}
 		t.keyDown(f.txFreq, freq, now)
 	case txOn:
-		if t.ssb != nil && t.am.isAM() && math.Abs(freq) < amMaxCarrierHz {
-			t.switchToSSB(f.txFreq, now)
-			return
+		if t.ssb != nil && !t.voice {
+			if signal && !t.baseSet {
+				t.baseFreq, t.baseSet = freq, true
+			}
+			// Judge AM by where the over's carrier started, not by the momentary estimate:
+			// between CW elements that estimate is meaningless and can sit near 0 Hz, and
+			// Zeus's CW (at -600 Hz) was taken for AM (2026-09-29).
+			if t.baseSet && math.Abs(t.baseFreq) < amMaxCarrierHz && t.am.isAM() {
+				slog.Warn("AM detected: the QMX cannot transmit AM; sending it as USB")
+				t.switchToSSB(f.txFreq, now, true)
+				return
+			}
+			if signal {
+				if math.Abs(freq-t.baseFreq) > fskShiftHz {
+					t.excursion += len(f.iq)
+				} else {
+					t.excursion = 0
+				}
+				if t.excursion >= fskHoldSamples {
+					slog.Info("wide FSK or MFSK (e.g. RTTY): moving the over to SSB", "from_hz", math.Round(t.baseFreq), "to_hz", math.Round(freq))
+					t.switchToSSB(f.txFreq, now, t.baseFreq >= 0)
+					return
+				}
+			}
 		}
 		t.follow(f.txFreq, freq, signal, now)
 	}
@@ -546,15 +573,23 @@ const dcPole = 1 - 2*math.Pi*20/48000
 // amMaxCarrierHz: an AM carrier sits at 0 Hz baseband (the TX frequency).
 const amMaxCarrierHz = 100
 
-// switchToSSB moves an over that went out as a tone but turned out to be AM to the QMX's
-// SSB mode (USB), which the QMX can transmit: the voice without the carrier. The over keeps
-// its start time, so -maxtx still counts from the key-down.
-func (t *transmitter) switchToSSB(txFreq uint32, now time.Time) {
-	slog.Warn("AM detected: the QMX cannot transmit AM; sending it as USB")
+// FT8/JS8 span 44 Hz, FT4 63 Hz and WSPR 6 Hz; RTTY shifts by 170 Hz (Zeus sent 85 Hz on
+// 2026-09-29) for bits of 22 ms. A CW edge can glitch the frequency estimate for a few ms, so
+// the excursion must last.
+const (
+	fskShiftHz     = 75
+	fskHoldSamples = 48000 * 15 / 1000 // 15 ms
+)
+
+// switchToSSB moves an over that went out as a tone to the QMX's SSB mode: AM (the QMX cannot
+// transmit it; the voice goes out without the carrier) or wide FSK such as RTTY (CAT TA cannot
+// follow its 22 ms bits cleanly). The over keeps its start time, so -maxtx still counts from
+// the key-down.
+func (t *transmitter) switchToSSB(txFreq uint32, now time.Time, usb bool) {
 	_ = t.radio.Tone(0) // returns the QMX to receive
 	t.toneOn = false
 	onSince := t.onSince
-	t.keyDownSSB(txFreq, now, true)
+	t.keyDownSSB(txFreq, now, usb)
 	t.onSince = onSince
 }
 

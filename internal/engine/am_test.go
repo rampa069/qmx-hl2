@@ -107,3 +107,132 @@ func TestTXTuneStaysTone(t *testing.T) {
 		t.Fatalf("TUNE: voice=%v, TA commands %d", h.tx.voice, h.radio.count("TA"))
 	}
 }
+
+// fsk returns a continuous-phase FSK signal: symbol k (of symLen samples) sits at
+// centre + shift*sym(k) Hz.
+func fsk(centre, shift float64, symLen int, sym func(k int) float64) func(int) complex128 {
+	var ph float64
+	last := -1
+	return func(i int) complex128 {
+		if i != last+1 {
+			ph = 0
+		}
+		last = i
+		ph += 2 * math.Pi * (centre + shift*sym(i/symLen)) / 48000
+		return complex(0.5*math.Cos(ph), 0.5*math.Sin(ph))
+	}
+}
+
+// RTTY starts with a steady mark (goes out as a tone), then its shift (170 Hz, or the 85 Hz
+// Zeus sent: mark 1500, space 1415) at 45.45 baud
+// moves it to SSB on the tone's side of the carrier.
+func TestTXRTTYSwitchesToSSB(t *testing.T) {
+	bits := []float64{0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0}
+	for _, tc := range []struct{ sign, shift float64 }{{1, 170}, {-1, 170}, {1, -85}} {
+		sign := tc.sign
+		h := newHarness(t)
+		h.tx.ssb = newSSBAudio(48000)
+		rtty := fsk(sign*1500, sign*tc.shift, 1056, func(k int) float64 {
+			if k < 14 { // ~300 ms of mark idle
+				return 0
+			}
+			return bits[k%len(bits)]
+		})
+		h.sendIQ(14080000, rtty, 1200*time.Millisecond)
+		if !h.tx.voice {
+			t.Fatalf("sign %+.0f: RTTY still a tone; radio log %v", sign, h.radio.log)
+		}
+		want := "MD2"
+		if sign < 0 {
+			want = "MD1"
+		}
+		saw := false
+		for _, c := range h.radio.log {
+			saw = saw || c == want
+		}
+		if !saw {
+			t.Errorf("sign %+.0f: no %s in %v", sign, want, h.radio.log)
+		}
+	}
+}
+
+// FT4 (4-FSK, 20.8 Hz spacing, 48 ms symbols) and CW stay tones.
+func TestTXNarrowFSKStaysTone(t *testing.T) {
+	ft4 := fsk(1500, 20.833, 2304, func(k int) float64 { return float64([]int{0, 1, 3, 2, 1, 0, 2, 3}[k%8]) })
+	cw := func(i int) complex128 { // 25 WPM dits at 600 Hz, 5 ms edges
+		p := i % 4608
+		a := 0.0
+		switch {
+		case p < 240:
+			a = 0.5 - 0.5*math.Cos(math.Pi*float64(p)/240)
+		case p < 2064:
+			a = 1
+		case p < 2304:
+			a = 0.5 + 0.5*math.Cos(math.Pi*float64(p-2064)/240)
+		}
+		ph := 2 * math.Pi * 600 * float64(i) / 48000
+		return complex(0.5*a*math.Cos(ph), 0.5*a*math.Sin(ph))
+	}
+	for name, g := range map[string]func(int) complex128{"ft4": ft4, "cw": cw} {
+		h := newHarness(t)
+		h.tx.ssb = newSSBAudio(48000)
+		h.sendIQ(14080000, g, 2*time.Second)
+		if h.tx.voice {
+			t.Errorf("%s moved to SSB; radio log %v", name, h.radio.log)
+		}
+	}
+}
+
+// Zeus's CW on 40 m (CWL) sits at -600 Hz and has short dropouts with phase jumps; on
+// 2026-09-29 one over was taken for AM, because the detector used the momentary frequency,
+// which reads 0 Hz between elements. Here the over starts clean, so it goes out as a tone,
+// then the dropouts are exaggerated (one per 2.5 ms block; the phase jump stays at one per
+// 10 ms, as in the real signal) so that the envelope detector trips. The over must still stay
+// a tone, since its carrier started at -600 Hz. (A real capture of Zeus CW had 39% of its
+// carrier blocks moving: close to the detector's 50%.)
+func TestTXZeusCWStaysTone(t *testing.T) {
+	const dot = 48000 * 60 / 1000 // 60 ms at 20 WPM
+	pattern := []int{1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0}
+	var ph float64
+	cw := func(i int) complex128 {
+		el := (i / dot) % len(pattern)
+		p := i % dot
+		a := 0.0
+		if pattern[el] == 1 {
+			a = 1
+			if pattern[(el+len(pattern)-1)%len(pattern)] == 0 && p < 240 { // 5 ms edges
+				a = 0.5 - 0.5*math.Cos(math.Pi*float64(p)/240)
+			}
+			if pattern[(el+1)%len(pattern)] == 0 && p >= dot-240 {
+				a = 0.5 + 0.5*math.Cos(math.Pi*float64(p-(dot-240))/240)
+			}
+		}
+		if i%480 < 24 { // Zeus: a 0.5 ms dropout with a phase jump every 10 ms
+			a = 0
+			if i%480 == 0 {
+				ph += 1.3
+			}
+		}
+		if i > 48000/2 && i%120 < 12 { // exaggerated: also a 0.25 ms dropout in every block
+			a = 0
+		}
+		ph -= 2 * math.Pi * 600 / 48000
+		return complex(0.5*a*math.Cos(ph), 0.5*a*math.Sin(ph))
+	}
+	var d amDetector
+	tripped := false
+	for i := 0; i < 5*48000; i++ {
+		d.add(cw(i))
+		tripped = tripped || d.isAM()
+	}
+	if !tripped {
+		t.Fatal("test signal does not trip the envelope detector; the test proves nothing")
+	}
+	ph = 0
+	h := newHarness(t)
+	h.tx.ssb = newSSBAudio(48000)
+	h.sendIQ(7035700, cw, 5*time.Second)
+	if h.tx.voice {
+		t.Fatalf("CW moved to SSB; radio log %v", h.radio.log[:min(len(h.radio.log), 12)])
+	}
+}
