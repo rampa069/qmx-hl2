@@ -123,11 +123,16 @@ type transmitter struct {
 	keyed                   atomic.Bool // read by meterLoop
 
 	cls     *classifier
-	pending []float32 // SSB audio captured while classifying
-	voice   bool      // current over uses the SSB path
-	ssb     *ssbAudio // nil when no playback stream (tone only)
-	scratch []float32
-	dump    io.Writer // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
+	pending []float32 // SSB audio captured while classifying (the last maxPending samples)
+	// armSignal counts TX samples since the first one with signal in this arming. The
+	// classification deadline runs from there, not from MOX: WSJT-X via Zeus keys MOX about
+	// 600 ms before its tones, and a deadline counted from MOX sent every such FT8 over to
+	// SSB (2026-09-27/28).
+	armSignal int
+	voice     bool      // current over uses the SSB path
+	ssb       *ssbAudio // nil when no playback stream (tone only)
+	scratch   []float32
+	dump      io.Writer // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
 }
 
 func newTransmitter(cfg TXConfig, radio TXRadio, active func(bool)) *transmitter {
@@ -262,6 +267,7 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		t.tr.Reset()
 		t.cls.reset()
 		t.pending = t.pending[:0]
+		t.armSignal = 0
 		t.voice = false
 		t.statMaxLevel = 0
 		t.armedFreq = f.txFreq
@@ -284,6 +290,14 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	}
 	if t.state == txArming && t.ssb != nil {
 		t.pending = append(t.pending, t.scratch...)
+		if over := len(t.pending) - maxPending; over > 0 { // only the latest audio is used
+			t.pending = append(t.pending[:0], t.pending[over:]...)
+		}
+	}
+	if t.tr.Ready() {
+		if l := t.tr.Level(); l > t.statMaxLevel {
+			t.statMaxLevel = l
+		}
 	}
 	if t.state == txOn && t.voice {
 		t.ssb.Push(t.scratch)
@@ -292,10 +306,10 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	if !t.tr.Ready() {
 		return
 	}
-	if l := t.tr.Level(); l > t.statMaxLevel {
-		t.statMaxLevel = l
-	}
 	signal := t.tr.Level() >= t.cfg.GateLevel
+	if t.state == txArming && (signal || t.armSignal > 0) {
+		t.armSignal += len(f.iq)
+	}
 	freq := t.tr.Freq()
 	switch t.state {
 	case txArming:
@@ -313,7 +327,7 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		}
 		switch kind {
 		case txUndecided:
-			if len(t.pending) > hpsdr.TXSampleRate/4 { // should not happen: decide() settles by 150 ms
+			if t.armSignal > hpsdr.TXSampleRate/4 { // should not happen: decide() settles by 150 ms
 				kind = txVoice
 			} else {
 				return
@@ -509,6 +523,9 @@ func (t *transmitter) keyUp(reason string) {
 		slog.Info("TX request ended", "reason", reason)
 	}
 }
+
+// maxPending bounds the audio kept while classifying; keyDownSSB uses the last FIFO target.
+const maxPending = hpsdr.TXSampleRate / 2
 
 // QMX MD values (kept local so tests need not import the qmx package).
 const (

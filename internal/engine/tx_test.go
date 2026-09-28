@@ -553,3 +553,31 @@ func TestSSBAudioRecoversWithoutLateAudio(t *testing.T) {
 		t.Fatal("still silent 10 s after the client came back")
 	}
 }
+
+// WSJT-X via Zeus keys MOX about 600 ms before its tones. With SSB available (auto mode) the
+// over must still go out as a tone: the classification deadline runs from the first signal,
+// not from MOX (every such FT8 over went to SSB before, 2026-09-27/28).
+func TestTXToneAfterSilentMOXLeadIn(t *testing.T) {
+	for _, amp := range []float64{0.3, 0.012} { // normal and barely above the gate
+		h := newHarness(t)
+		h.tx.ssb = newSSBAudio(48000)
+		h.send(true, 18100000, 0, 0, 600*time.Millisecond)
+		h.send(true, 18100000, 1500, amp, 500*time.Millisecond)
+		if h.tx.voice || h.radio.count("TA") == 0 {
+			t.Errorf("amp %.3f: voice=%v, TA commands %d; want a tone over", amp, h.tx.voice, h.radio.count("TA"))
+		}
+	}
+}
+
+// Zeus keys MOX ~0.4 s before an SSTV picture, whose VIS leader is a steady 1900 Hz. Once the
+// deadline stopped counting from MOX, the leader was classified as FT8 and a whole Robot36
+// frame went out through CAT TA (2026-09-28). It must go out as SSB.
+func TestTXSSTVLeaderGoesSSB(t *testing.T) {
+	h := newHarness(t)
+	h.tx.ssb = newSSBAudio(48000)
+	h.send(true, 14230000, 0, 0, 400*time.Millisecond)
+	h.send(true, 14230000, 1900, 0.5, 300*time.Millisecond)
+	if !h.tx.voice || h.radio.count("TA") != 0 {
+		t.Errorf("voice=%v, TA commands %d; want SSB", h.tx.voice, h.radio.count("TA"))
+	}
+}

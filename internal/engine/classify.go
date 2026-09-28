@@ -49,6 +49,8 @@ const cohLag = 96 // 2 ms
 
 const classifyBlock = 120 // 2.5 ms at 48 kHz
 
+const sstvLeaderHz = 1900
+
 func newClassifier(gate float64) *classifier {
 	c := &classifier{gate: gate, block: classifyBlock}
 	c.reset()
@@ -121,13 +123,18 @@ func (c *classifier) decide() txKind {
 	spread := c.fmax - c.fmin
 	beating := c.nullBlocks*2 > c.voiced
 	toneLike := spread < 60 && c.minCoh > 0.9 && !beating
+	// An SSTV picture starts with a 300 ms leader at 1900 Hz, a clean single tone until its
+	// 1200 Hz break; taken for FT8, a whole Robot36 frame went out through CAT TA
+	// (2026-09-28). A steady tone at 1900 Hz therefore settles as voice. An FT8/WSPR signal
+	// at exactly that audio frequency also goes out through SSB, which still works.
+	leader := toneLike && math.Abs(math.Abs((c.fmin+c.fmax)/2)-sstvLeaderHz) < 30
 	switch {
-	case c.voiced >= 16 && toneLike: // 40 ms: longer than a PSK31 symbol, so a reversal shows up
+	case c.voiced >= 16 && toneLike && !leader: // 40 ms: longer than a PSK31 symbol, so a reversal shows up
 		return txTone
 	case c.voiced >= 6 && (spread >= 200 || c.minCoh < 0.7 || beating):
 		return txVoice
 	case c.blocks >= 60 && c.voiced >= 4: // 150 ms after the signal started: settle
-		if toneLike {
+		if toneLike && !leader {
 			return txTone
 		}
 		return txVoice

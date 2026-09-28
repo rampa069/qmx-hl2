@@ -129,3 +129,18 @@ func TestClassifyToneAfterLongSilence(t *testing.T) {
 	}
 	t.Fatal("undecided")
 }
+
+// An SSTV VIS leader (1900 Hz, USB or LSB) must not be taken for a digital-mode tone, even
+// though it is a clean single tone for its first 300 ms; tones elsewhere still are.
+func TestClassifySSTVLeaderIsVoice(t *testing.T) {
+	for _, f := range []float64{1900, -1900, 1915} {
+		if k, _, _ := classify(tone(f)); k != txVoice {
+			t.Errorf("steady %.0f Hz: %v, want voice", f, k)
+		}
+	}
+	for _, f := range []float64{1500, 1850, -1500} {
+		if k, _, _ := classify(tone(f)); k != txTone {
+			t.Errorf("steady %.0f Hz: %v, want tone", f, k)
+		}
+	}
+}
