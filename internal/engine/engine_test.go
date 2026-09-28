@@ -432,3 +432,86 @@ func TestEngineEP6PacedByClockDuringTX(t *testing.T) {
 		t.Errorf("EP6 during TX: %.1f packets/s, want about 381", rate)
 	}
 }
+
+// fakePlayback consumes frames at speed × 48 kHz on an absolute schedule, like a blocking
+// USB audio stream on the QMX's own clock.
+type fakePlayback struct {
+	speed  float64
+	t0     time.Time
+	frames int64
+}
+
+func (p *fakePlayback) Write(src []float32) error {
+	if p.t0.IsZero() {
+		p.t0 = time.Now()
+	}
+	p.frames += int64(len(src) / 2)
+	due := p.t0.Add(time.Duration(float64(p.frames) / (48000 * p.speed) * float64(time.Second)))
+	time.Sleep(time.Until(due))
+	return nil
+}
+func (p *fakePlayback) Pause() error  { p.t0, p.frames = time.Time{}, 0; return nil }
+func (p *fakePlayback) Resume() error { return nil }
+func (p *fakePlayback) Close() error  { return nil }
+
+// During an SSB over EP6 follows the QMX playback clock, so a client pacing TX off EP6
+// delivers audio at exactly the rate the QMX plays it (constant FIFO latency, no SSTV slant).
+func TestEngineEP6PacedByPlaybackDuringSSB(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["QB"], cat.state["QC"] = "QB1;", "QC120;"
+	cat.state["SW"], cat.state["PC"], cat.state["SS"] = "SW120;", "PC38;", "SS1;"
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	cfg.TX.SwapIQ = false
+	cfg.TX.Mode = "ssb"
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	out := &capSender{}
+	e := New(cfg, client, &fakeCapture{frames: 240, speed: 1.011}, out)
+	e.SetPlayback(&fakePlayback{speed: 0.99})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{14074000, 0x04})) // 48k, 1 RX
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	waitFor(t, func() bool { return cat.get("FA") == "FA00014086000;" }, "RX tune")
+
+	var ph float64
+	stop := make(chan struct{})
+	go func() { // a client pacing TX off EP6: one EP2 (126 samples) per EP6 at 48k, 1 RX
+		var sent int64
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for ; sent < e.ep6Count.Load(); sent++ {
+				e.EP2(ep2Tone(true, 1500, &ph))
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	waitFor(t, func() bool { _, ok := e.playbackClock(); return ok }, "SSB playback")
+	time.Sleep(200 * time.Millisecond)
+	out.take()
+	t0 := time.Now()
+	time.Sleep(3 * time.Second)
+	n := len(out.take())
+	el := time.Since(t0).Seconds()
+	u, _, _, disc, ppm := e.tx.ssb.OverStats()
+	close(stop)
+	cancel()
+	<-done
+	rate := float64(n) / el
+	// 0.99 × 48 kHz / 126 = 377.1 packets/s; the wall clock would give 381.
+	if want := 381 * 0.99; math.Abs(rate/want-1) > 0.004 {
+		t.Errorf("EP6 during SSB: %.1f packets/s, want about %.1f", rate, want)
+	}
+	if u != 0 || disc != 0 || ppm != 0 {
+		t.Errorf("SSB audio: underruns %d, discarded %d, resampled %+.1f ppm; want all 0", u, disc, ppm)
+	}
+}

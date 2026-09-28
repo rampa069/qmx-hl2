@@ -5,8 +5,11 @@ package engine
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -293,34 +296,32 @@ func TestTXAutoToneStaysTA(t *testing.T) {
 func TestSSBAudioStartsAtTarget(t *testing.T) {
 	a := newSSBAudio(48000)
 	out := make([]float32, 240)
-	a.Push(make([]float32, 1000))
+	a.Push(make([]float32, a.target-1))
 	a.fill(out)
 	if a.playing {
 		t.Fatal("started before reaching target")
 	}
-	a.Push(make([]float32, 2000))
+	a.Push(make([]float32, 1))
 	a.fill(out)
 	if !a.playing {
 		t.Fatal("did not start at target")
 	}
 }
 
-// The producer runs 165 ppm fast with bursty delivery (like the bench QMX clocks and
-// network jitter); the controller must hold the fill near target without underruns.
-func TestSSBAudioDriftServo(t *testing.T) {
-	a := newSSBAudio(48000)
+// feedSSB runs n 5 ms output chunks. Every 20 ms the producer delivers what is due, in
+// 126-sample packets (bursty, like EP2 over the network); due(step) gives the total samples
+// it should have produced by then. check is called after each chunk.
+func feedSSB(a *ssbAudio, n int, due func(step int) float64, check func(step int)) {
 	out := make([]float32, 240)
-	const inRate = 48000 * (1 + 165e-6)
 	var produced, phase float64
 	chunk := make([]float32, 0, 1024)
-	for step := 0; step < 200*120; step++ { // 120 s of 5 ms output chunks
-		// Producer: deliver what is due, in 126-sample packets, bursty every 20 ms.
+	for step := 0; step < n; step++ {
 		if step%4 == 0 {
-			due := float64(step+4)*240*inRate/48000 - produced
+			d := due(step+4) - produced
 			chunk = chunk[:0]
-			for ; due >= 126; due -= 126 {
+			for ; d >= 126; d -= 126 {
 				for k := 0; k < 126; k++ {
-					phase += 2 * math.Pi * 1000 / inRate
+					phase += 2 * math.Pi * 1000 / 48000
 					chunk = append(chunk, float32(0.5*math.Sin(phase)))
 				}
 				produced += 126
@@ -328,19 +329,86 @@ func TestSSBAudioDriftServo(t *testing.T) {
 			a.Push(chunk)
 		}
 		a.fill(out)
+		if check != nil {
+			check(step)
+		}
 	}
-	u, ppm := a.Stats()
-	if u != 0 {
-		t.Errorf("underruns = %d", u)
+}
+
+// A client that paces TX from EP6, which follows the playback clock, delivers exactly what
+// the QMX plays: the audio must go through unresampled and the latency must not move, or an
+// SSTV picture slants (2026-09-28).
+func TestSSBAudioLockedClientKeepsLatency(t *testing.T) {
+	a := newSSBAudio(48000)
+	a.Start()
+	a.Push(make([]float32, a.target))
+	lo, hi := math.Inf(1), math.Inf(-1)
+	feedSSB(a, 200*120, func(step int) float64 { return float64(step) * 240 }, func(step int) {
+		if step < 200 {
+			return
+		}
+		a.mu.Lock()
+		f := float64(len(a.fifo)) - a.pos
+		a.mu.Unlock()
+		lo, hi = math.Min(lo, f), math.Max(hi, f)
+	})
+	u, _, _, disc, ppm := a.OverStats()
+	if u != 0 || disc != 0 {
+		t.Errorf("underruns %d, discarded %d", u, disc)
 	}
-	if math.Abs(ppm-165) > 40 {
-		t.Errorf("servo ratio %+.0f ppm, want about +165", ppm)
+	if ppm != 0 {
+		t.Errorf("resampled by %+.1f ppm, want exactly 0", ppm)
+	}
+	// Only packet jitter (20 ms bursts) may move the fill; no drift over 2 minutes.
+	if hi-lo > 20*48+240 {
+		t.Errorf("fill moved %.0f samples (%.1f ms) over the over", hi-lo, (hi-lo)/48)
+	}
+}
+
+// A client on its own clock, 165 ppm fast (the bench clock difference): the FIFO absorbs the
+// difference until the fill leaves the dead band, then the resampler holds it there.
+func TestSSBAudioUnlockedClientIsHeld(t *testing.T) {
+	a := newSSBAudio(48000)
+	a.Start()
+	a.Push(make([]float32, a.target))
+	const inRate = 48000 * (1 + 165e-6)
+	feedSSB(a, 200*600, func(step int) float64 { return float64(step) * 240 * inRate / 48000 }, nil)
+	u, _, _, disc, _ := a.OverStats()
+	if u != 0 || disc != 0 {
+		t.Errorf("underruns %d, discarded %d", u, disc)
 	}
 	a.mu.Lock()
-	fill := len(a.fifo)
+	ratio, fill := a.ratio, len(a.fifo)
 	a.mu.Unlock()
-	if d := fill - a.target; d < -960 || d > 960 {
-		t.Errorf("fill %d samples, target %d", fill, a.target)
+	if ppm := (ratio - 1) * 1e6; math.Abs(ppm-165) > 40 {
+		t.Errorf("resampler at %+.0f ppm after 10 min, want about +165", ppm)
+	}
+	if max := int(float64(a.target) * (1 + deadBand + 0.25)); fill > max {
+		t.Errorf("fill %d samples, want at most %d", fill, max)
+	}
+}
+
+func TestSSBAudioClockSettles(t *testing.T) {
+	a := newSSBAudio(48000)
+	if _, ok := a.Clock(); ok {
+		t.Fatal("clock valid outside an over")
+	}
+	a.Start()
+	a.mu.Lock()
+	a.resumed = time.Now()
+	a.mu.Unlock()
+	if _, ok := a.Clock(); ok {
+		t.Fatal("clock valid before the device buffer settled")
+	}
+	a.mu.Lock()
+	a.resumed = time.Now().Add(-clockSettle)
+	a.mu.Unlock()
+	if _, ok := a.Clock(); !ok {
+		t.Fatal("clock not valid after settling")
+	}
+	a.Stop()
+	if _, ok := a.Clock(); ok {
+		t.Fatal("clock valid after the over")
 	}
 }
 
@@ -398,5 +466,90 @@ func TestTXSSBStartsAtTargetAfterLongSilence(t *testing.T) {
 	h.tx.ssb.mu.Unlock()
 	if disc != 0 || fill > h.tx.ssb.target+48000/5 {
 		t.Fatalf("FIFO fill %d (target %d), discarded %d", fill, h.tx.ssb.target, disc)
+	}
+}
+
+func TestWAVWriter(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "x.wav")
+	w, err := createWAV(name, 48000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write([]float32{0, 0.5, -1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 44+8 || string(b[:4]) != "RIFF" || binary.LittleEndian.Uint32(b[4:]) != 36+8 ||
+		binary.LittleEndian.Uint32(b[40:]) != 8 || binary.LittleEndian.Uint32(b[24:]) != 48000 {
+		t.Fatalf("bad WAV header: % x", b[:44])
+	}
+	if v := int16(binary.LittleEndian.Uint16(b[50:])); v != 32767 { // 2 clips to full scale
+		t.Errorf("last sample %d, want 32767", v)
+	}
+}
+
+// The client stalls for 200 ms (longer than the FIFO) and then delivers the late audio at
+// once, as a client pacing off EP6 does. The audio after the gap must stay aligned with the
+// input timeline, and the resampler must not react.
+func TestSSBAudioLateAudioKeepsAlignment(t *testing.T) {
+	a := newSSBAudio(48000)
+	a.Start()
+	var produced int
+	ramp := func(n int) []float32 { // sample value encodes its input index
+		x := make([]float32, n)
+		for i := range x {
+			x[i] = float32(produced+i) / 1e7
+		}
+		produced += n
+		return x
+	}
+	a.Push(ramp(a.target))
+	out := make([]float32, 240)
+	var played []float32
+	for step := 0; step < 400; step++ { // 2 s
+		if step%4 == 0 && (step < 100 || step >= 140) { // stall from 0.5 s to 0.7 s
+			due := (step+4)*240 + a.target
+			a.Push(ramp(due - produced))
+		}
+		a.fill(out)
+		played = append(played, out...)
+	}
+	u, _, _, disc, ppm := a.OverStats()
+	if u != 1 || disc != 0 || ppm != 0 {
+		t.Fatalf("underruns %d, discarded %d, resampled %+.1f ppm; want 1, 0, 0", u, disc, ppm)
+	}
+	// Output sample k must carry input sample k (constant latency) wherever it is not silence.
+	// Output sample k carries input sample k+off (off = 1, the interpolator's history) before
+	// the gap; after it the same offset must hold (constant latency).
+	off := played[1000]*1e7 - 1000
+	for k := len(played) - 48000; k < len(played); k++ {
+		if d := played[k]*1e7 - float32(k) - off; d > 0.5 || d < -0.5 {
+			t.Fatalf("output %d carries input %.0f, want %.0f (latency moved)", k, played[k]*1e7, float32(k)+off)
+		}
+	}
+}
+
+// A client that never delivers the late audio must not leave the FIFO silent for good.
+func TestSSBAudioRecoversWithoutLateAudio(t *testing.T) {
+	a := newSSBAudio(48000)
+	a.Start()
+	a.Push(make([]float32, a.target))
+	out := make([]float32, 240)
+	for step := 0; step < 200; step++ { // drain it: nothing arrives for 1 s
+		a.fill(out)
+	}
+	for step := 0; step < 2000; step++ { // then 240 samples per chunk, nothing late
+		a.Push(make([]float32, 240))
+		a.fill(out)
+	}
+	a.mu.Lock()
+	playing := a.playing
+	a.mu.Unlock()
+	if !playing {
+		t.Fatal("still silent 10 s after the client came back")
 	}
 }

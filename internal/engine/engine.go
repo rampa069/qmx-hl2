@@ -133,6 +133,7 @@ func (e *Engine) SetPlayback(pb audio.PlaybackStream) {
 	e.playback = pb
 	if e.tx != nil && pb != nil {
 		e.tx.ssb = newSSBAudio(e.cfg.SampleRate)
+		e.tx.ssb.wavDir = e.cfg.TX.WAVDir
 	}
 }
 
@@ -440,14 +441,21 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		rateEP2, rateEP6 int64
 		rateFrames       int64
 		// rxRate is the QMX capture rate measured while receiving. While transmitting,
-		// EP6 is paced from the wall clock at this rate instead of from capture: with USB
-		// audio playing to the QMX (SSB), its capture stream runs about 1.1% fast
-		// (48552 vs 48008 frames/s, 2026-09-27), and clients pace their TX audio off EP6.
+		// EP6 is not paced from capture: with USB audio playing to the QMX (SSB), its
+		// capture stream runs about 1.1% fast (48552 vs 48008 frames/s, 2026-09-27), and
+		// clients pace their TX audio off EP6. During an SSB over EP6 follows the frames
+		// the QMX has played, so the client's audio arrives at exactly the playback rate
+		// and the SSB FIFO keeps a constant latency (SSTV slants otherwise). Before that,
+		// and for tone overs, it follows the wall clock at rxRate.
 		rxRate    = float64(e.cfg.SampleRate)
 		wasTX     bool
-		vT0       time.Time
 		vProduced int64
 		rateWasTX bool
+		wallT0    time.Time
+		wallBase  int64
+		dacPaced  bool
+		dacC0     int64
+		dacBase   int64
 	)
 	send := func(pkt []byte) {
 		e.ep6Count.Add(1)
@@ -560,12 +568,23 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		L := interp.L
 		if transmitting {
 			rateWasTX = true
-			// Pace EP6 from the wall clock at rxRate (the IQ is muted anyway).
+			// The IQ is muted anyway; only the pacing matters.
 			if !wasTX {
-				vT0, vProduced = now, 0
+				vProduced, wallT0, wallBase, dacPaced = 0, now, 0, false
 			}
 			wasTX = true
-			want := int64(now.Sub(vT0).Seconds() * rxRate)
+			var want int64
+			if c, ok := e.playbackClock(); ok {
+				if !dacPaced {
+					dacPaced, dacC0, dacBase = true, c, vProduced
+				}
+				want = dacBase + c - dacC0
+			} else {
+				if dacPaced {
+					dacPaced, wallT0, wallBase = false, now, vProduced
+				}
+				want = wallBase + int64(now.Sub(wallT0).Seconds()*rxRate)
+			}
 			m := max(0, min(want-vProduced, int64(2*len(xs))))
 			vProduced += m
 			for i := int64(0); i < m; i++ {
@@ -618,6 +637,15 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		builder.SetTelemetry(tel)
 	}
 	return nil
+}
+
+// playbackClock returns the frames the QMX has played in the current SSB over; ok is false
+// when no SSB over is playing.
+func (e *Engine) playbackClock() (int64, bool) {
+	if e.tx == nil || e.tx.ssb == nil {
+		return 0, false
+	}
+	return e.tx.ssb.Clock()
 }
 
 func to24(v float64) int32 {

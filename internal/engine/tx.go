@@ -57,6 +57,9 @@ type TXConfig struct {
 	Mode string
 	// SSBGain scales the SSB audio (1.0 = the client's TX IQ amplitude as is).
 	SSBGain float64
+	// WAVDir, if set, receives one WAV file per SSB over with the audio exactly as played
+	// to the QMX, so an SSTV picture can be decoded offline.
+	WAVDir string
 	// SwapIQ exchanges the host's TX I and Q words. HPSDR clients send TX I/Q "reversed
 	// relative to receive" (USB protocol doc); with Zeus on 2026-09-27 an FT8 tone at +1500 Hz
 	// arrived as -1500 Hz unswapped, so the default is true.
@@ -381,7 +384,7 @@ func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time) {
 	// Clients key MOX well before the audio (Zeus + an SSTV app: over a second of silence),
 	// and all of that was captured while classifying. Start the FIFO at its target with the
 	// most recent audio: pushing everything overflowed the FIFO and left 0.5 s of latency
-	// that the drift servo (max 1000 ppm) could not drain within an over (2026-09-27).
+	// that the resampler (max 1000 ppm) could not drain within an over (2026-09-27).
 	pre := t.pending
 	if max := t.ssb.target; len(pre) > max {
 		pre = pre[len(pre)-max:]
@@ -477,9 +480,8 @@ func (t *transmitter) keyUp(reason string) {
 	t.keyed.Store(false)
 	if was == txOn {
 		if t.voice {
-			u, ppm := t.ssb.Stats()
-			in, out, disc := t.ssb.OverStats()
-			slog.Info("SSB audio", "underruns", u, "drift_ppm", math.Round(ppm),
+			u, in, out, disc, ppm := t.ssb.OverStats()
+			slog.Info("SSB audio", "underruns", u, "resample_ppm", math.Round(ppm),
 				"in_rate", math.Round(in), "out_rate", math.Round(out), "discarded", disc)
 			t.ssb.Stop()
 			if err := t.radio.RX(); err != nil {

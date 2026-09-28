@@ -52,8 +52,9 @@ transmission:
   and sends it to the QMX with the CAT tone command (`TA`). The QMX stays in Digi mode and
   generates a clean, keyed carrier at exactly the right frequency.
 - **Anything else** (voice, SSTV, PSK, two-tone): the QMX is switched to USB or LSB with USB
-  audio as the source. The client's audio is played to the QMX through a small buffer, with a
-  resampler that follows the clock difference between the QMX's input and output.
+  audio as the source. During the over the client's TX pacing is locked to the QMX's playback
+  clock, so its audio goes through a small buffer at a constant delay, without resampling
+  (SSTV pictures stay straight).
 
 The receive and transmit sideband conventions follow what HPSDR clients expect from real
 hardware, and the RX dial and Digi mode are restored after every transmission.
@@ -125,6 +126,7 @@ settings it found.
 | `-txmode` | `auto` | `auto` (tone for FT8/CW, SSB for everything else), `tone`, or `ssb` |
 | `-ssbgain` | 0 | dB of gain on SSB transmit audio |
 | `-maxtx` | 3m | Longest continuous transmission (raise for long SSTV modes) |
+| `-txwav` | | Save each SSB over, exactly as played to the QMX, as a WAV file in this directory (decode SSTV offline) |
 | `-audio` | `QMX` | Sound device name or substring (see `-list`) |
 | `-serial` | auto | QMX serial port (auto-detected by USB ID) |
 | `-listen` | `:1024` | UDP address to listen on |

@@ -38,6 +38,7 @@ type Config struct {
 	NoiseFill bool          // fill the band outside the QMX's 48 kHz with low-level noise
 	LOOffset  int           // Hz between RX1 and the QMX IQ centre
 	SSBGain   float64       // dB applied to SSB transmit audio
+	TXWAVDir  string        // if set, each SSB over's audio as played to the QMX is saved here
 
 	// One-shot modes.
 	List          bool          // list audio devices and serial ports, then exit
@@ -68,6 +69,7 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.BoolVar(&c.TXSwapIQ, "txswapiq", false, "invert the TX I/Q convention (use if transmitted tones come out mirrored around the dial)")
 	fs.StringVar(&c.TXMode, "txmode", "auto", "transmit path: auto (tone for FT8/CW, SSB for voice), tone, or ssb")
 	fs.Float64Var(&c.SSBGain, "ssbgain", 0, "gain in dB for SSB transmit audio sent to the QMX")
+	fs.StringVar(&c.TXWAVDir, "txwav", "", "save the audio of each SSB over, as played to the QMX, as a WAV file in this directory (for checking SSTV offline)")
 	fs.DurationVar(&c.MaxTX, "maxtx", 3*time.Minute, "longest continuous transmission before TX is cut (e.g. 5m for long SSTV modes)")
 	fs.BoolVar(&c.IQBal, "iqbal", true, "correct QMX I/Q gain/phase mismatch (improves image rejection)")
 	fs.BoolVar(&c.NoiseFill, "noisefill", true, "at 96/192/384 kHz, fill the band the QMX cannot cover with low-level noise")

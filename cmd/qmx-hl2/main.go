@@ -309,6 +309,7 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.NoiseFill = cfg.NoiseFill
 	ecfg.LOOffset = cfg.LOOffset
 	ecfg.TX.SSBGain = math.Pow(10, cfg.SSBGain/20)
+	ecfg.TX.WAVDir = cfg.TXWAVDir
 	if cfg.TXSwapIQ {
 		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ
 	}
