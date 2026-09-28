@@ -23,7 +23,8 @@ built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 | FT8 / FT4 / WSPR / JS8 / RTTY transmit | works: complete FT8 QSOs, spots on PSK Reporter |
 | CW transmit | works (client-generated CW keyed through the QMX) |
 | SSB voice transmit | works |
-| SSTV transmit | transmits correctly; full image-decode test pending |
+| SSTV transmit | works: pictures received straight by remote stations |
+| FreeDV RADE V1 transmit | works: first QSO on 28 Sep 2026 with EC7C on 40 m, good reports (Zeus's built-in RADE); the first FreeDV QSO for both stations |
 | Power / SWR meters in the client | works |
 | Other clients (Thetis, piHPSDR, SparkSDR, Quisk) | not yet tested |
 | Linux x86-64 | tested (Debian 13) |
