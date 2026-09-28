@@ -29,6 +29,7 @@ import (
 	"github.com/rampa069/qmx-hl2/internal/probe"
 	"github.com/rampa069/qmx-hl2/internal/qmx"
 	"github.com/rampa069/qmx-hl2/internal/serial"
+	"github.com/rampa069/qmx-hl2/internal/virtual"
 )
 
 func main() {
@@ -274,26 +275,45 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	}
 	id.MAC = mac
 
-	dev, err := serial.FindQMX(cfg.SerialPort)
-	if err != nil {
-		return err
-	}
-	port := serial.NewPort(serial.DefaultBaud)
-	if err := port.Open(dev); err != nil {
-		return err
-	}
-	defer port.Close()
+	// The QMX: the real one on USB, or with -parrot a virtual one that replays each
+	// transmission to the client (no serial port, no sound card, nothing on the air).
+	var (
+		port     qmx.ReadWriter
+		capt     audio.CaptureStream
+		openPlay func() (audio.PlaybackStream, error)
+		dev      string
+	)
+	if cfg.Parrot > 0 {
+		vr := virtual.New(cfg.SampleRate, cfg.Frames, cfg.Parrot)
+		port, capt, dev = vr.CAT(), vr.Capture(), "virtual (parrot)"
+		openPlay = func() (audio.PlaybackStream, error) { return vr.Playback(), nil }
+	} else {
+		dev, err = serial.FindQMX(cfg.SerialPort)
+		if err != nil {
+			return err
+		}
+		sp := serial.NewPort(serial.DefaultBaud)
+		if err := sp.Open(dev); err != nil {
+			return err
+		}
+		defer sp.Close()
+		port = sp
 
-	be := audio.NewPABackend()
-	if err := be.Init(); err != nil {
-		return fmt.Errorf("init audio: %w", err)
+		be := audio.NewPABackend()
+		if err := be.Init(); err != nil {
+			return fmt.Errorf("init audio: %w", err)
+		}
+		defer be.Terminate()
+		c, err := be.OpenCapture(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		capt = c
+		openPlay = func() (audio.PlaybackStream, error) {
+			return be.OpenPlayback(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+		}
 	}
-	defer be.Terminate()
-	capt, err := be.OpenCapture(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
-	if err != nil {
-		return err
-	}
-	defer capt.Close()
 
 	ecfg := engine.DefaultConfig()
 	ecfg.SampleRate = cfg.SampleRate
@@ -310,6 +330,7 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.LOOffset = cfg.LOOffset
 	ecfg.TX.SSBGain = math.Pow(10, cfg.SSBGain/20)
 	ecfg.TX.WAVDir = cfg.TXWAVDir
+	ecfg.TX.Virtual = cfg.Parrot > 0
 	if cfg.TXSwapIQ {
 		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ
 	}
@@ -325,7 +346,7 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	var srv *hpsdr.Server
 	eng := engine.New(ecfg, cat, capt, senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) }))
 	if cfg.TX && cfg.TXMode != "tone" {
-		pb, err := be.OpenPlayback(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+		pb, err := openPlay()
 		if err != nil {
 			return fmt.Errorf("SSB transmit needs QMX audio playback: %w", err)
 		}
@@ -340,7 +361,9 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s) with QMX on %s; Ctrl-C to stop\n", srv.LocalAddr(), id.MAC, dev)
-	if cfg.TX {
+	if cfg.Parrot > 0 {
+		fmt.Printf("PARROT: nothing is transmitted; each transmission is replayed to the client %s after it starts\n", cfg.Parrot)
+	} else if cfg.TX {
 		fmt.Printf("TX ENABLED (mode %s): the QMX transmits when the client keys MOX\n", cfg.TXMode)
 	} else {
 		fmt.Println("receive only (start with -tx to allow transmitting)")

@@ -56,6 +56,8 @@ transmission:
   audio as the source. During the over the client's TX pacing is locked to the QMX's playback
   clock, so its audio goes through a small buffer at a constant delay, without resampling
   (SSTV pictures stay straight).
+- **AM**: the QMX cannot transmit AM. An AM over starts out as a plain carrier (like a TUNE);
+  once the modulation shows, it is moved to USB, so the voice goes out without the carrier.
 
 The receive and transmit sideband conventions follow what HPSDR clients expect from real
 hardware, and the RX dial and Digi mode are restored after every transmission.
@@ -128,6 +130,7 @@ settings it found.
 | `-ssbgain` | 0 | dB of gain on SSB transmit audio |
 | `-maxtx` | 3m | Longest continuous transmission (raise for long SSTV modes) |
 | `-txwav` | | Save each SSB over, exactly as played to the QMX, as a WAV file in this directory (decode SSTV offline) |
+| `-parrot` | | No QMX: a virtual radio replays each transmission to the client this long after it starts (`15s` for FT8, `7.5s` for FT4, so the replay lands in your receive slot). Tests the client and the whole transmit chain without RF; implies `-tx` |
 | `-audio` | `QMX` | Sound device name or substring (see `-list`) |
 | `-serial` | auto | QMX serial port (auto-detected by USB ID) |
 | `-listen` | `:1024` | UDP address to listen on |

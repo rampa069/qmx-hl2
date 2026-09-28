@@ -295,7 +295,11 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 			return nil, err
 		}
 		e.cat.AllowTX(true)
-		slog.Warn("TX ENABLED: the QMX will transmit when the client keys MOX")
+		if e.cfg.TX.Virtual {
+			slog.Info("TX enabled on the virtual QMX (-parrot): nothing is transmitted")
+		} else {
+			slog.Warn("TX ENABLED: the QMX will transmit when the client keys MOX")
+		}
 	}
 	// Digi mode puts the LO exactly IFOffset below the dial (CW mode adds its own offset).
 	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {

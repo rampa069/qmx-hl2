@@ -57,6 +57,8 @@ type TXConfig struct {
 	Mode string
 	// SSBGain scales the SSB audio (1.0 = the client's TX IQ amplitude as is).
 	SSBGain float64
+	// Virtual is set when the radio is the -parrot stand-in: nothing reaches the air.
+	Virtual bool
 	// WAVDir, if set, receives one WAV file per SSB over with the audio exactly as played
 	// to the QMX, so an SSTV picture can be decoded offline.
 	WAVDir string
@@ -129,8 +131,10 @@ type transmitter struct {
 	// 600 ms before its tones, and a deadline counted from MOX sent every such FT8 over to
 	// SSB (2026-09-27/28).
 	armSignal int
-	voice     bool      // current over uses the SSB path
-	ssb       *ssbAudio // nil when no playback stream (tone only)
+	am        amDetector // AM over going out as a tone: switch it to SSB
+	dcX, dcY  float64    // DC blocker on the SSB audio (an AM carrier is DC in it)
+	voice     bool       // current over uses the SSB path
+	ssb       *ssbAudio  // nil when no playback stream (tone only)
 	scratch   []float32
 	dump      io.Writer // debug: raw MOX-frame TX IQ (int16 LE pairs), if set
 }
@@ -268,6 +272,8 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		t.cls.reset()
 		t.pending = t.pending[:0]
 		t.armSignal = 0
+		t.am.reset()
+		t.dcX, t.dcY = 0, 0
 		t.voice = false
 		t.statMaxLevel = 0
 		t.armedFreq = f.txFreq
@@ -284,11 +290,18 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 		if t.state == txArming {
 			t.cls.add(x)
 		}
+		if t.state == txOn && !t.voice {
+			t.am.add(x)
+		}
 		// The real part of the analytic signal is the audio; the QMX's SSB modulator picks
 		// the sideband, so the same audio serves USB and LSB.
-		t.scratch = append(t.scratch, float32(clamp1(i*t.cfg.SSBGain)))
+		a := i * t.cfg.SSBGain
+		y := a - t.dcX + dcPole*t.dcY
+		t.dcX, t.dcY = a, y
+		t.scratch = append(t.scratch, float32(clamp1(y)))
 	}
-	if t.state == txArming && t.ssb != nil {
+	// Also while a tone over is on: an AM over may switch to SSB and needs recent audio.
+	if (t.state == txArming || t.state == txOn && !t.voice) && t.ssb != nil {
 		t.pending = append(t.pending, t.scratch...)
 		if over := len(t.pending) - maxPending; over > 0 { // only the latest audio is used
 			t.pending = append(t.pending[:0], t.pending[over:]...)
@@ -334,11 +347,15 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 			}
 		}
 		if kind == txVoice && t.ssb != nil {
-			t.keyDownSSB(f.txFreq, now)
+			t.keyDownSSB(f.txFreq, now, t.cls.upperSideband())
 			return
 		}
 		t.keyDown(f.txFreq, freq, now)
 	case txOn:
+		if t.ssb != nil && t.am.isAM() && math.Abs(freq) < amMaxCarrierHz {
+			t.switchToSSB(f.txFreq, now)
+			return
+		}
 		t.follow(f.txFreq, freq, signal, now)
 	}
 }
@@ -375,8 +392,7 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 }
 
 // keyDownSSB transmits the client's audio through the QMX's SSB modulator.
-func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time) {
-	usb := t.cls.upperSideband()
+func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time, usb bool) {
 	mode, name := qmxModeUSB, "USB"
 	if !usb {
 		mode, name = qmxModeLSB, "LSB"
@@ -522,6 +538,24 @@ func (t *transmitter) keyUp(reason string) {
 	} else if was != txIdle {
 		slog.Info("TX request ended", "reason", reason)
 	}
+}
+
+// dcPole puts the SSB audio DC blocker's corner at about 20 Hz.
+const dcPole = 1 - 2*math.Pi*20/48000
+
+// amMaxCarrierHz: an AM carrier sits at 0 Hz baseband (the TX frequency).
+const amMaxCarrierHz = 100
+
+// switchToSSB moves an over that went out as a tone but turned out to be AM to the QMX's
+// SSB mode (USB), which the QMX can transmit: the voice without the carrier. The over keeps
+// its start time, so -maxtx still counts from the key-down.
+func (t *transmitter) switchToSSB(txFreq uint32, now time.Time) {
+	slog.Warn("AM detected: the QMX cannot transmit AM; sending it as USB")
+	_ = t.radio.Tone(0) // returns the QMX to receive
+	t.toneOn = false
+	onSince := t.onSince
+	t.keyDownSSB(txFreq, now, true)
+	t.onSince = onSince
 }
 
 // maxPending bounds the audio kept while classifying; keyDownSSB uses the last FIFO target.
