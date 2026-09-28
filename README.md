@@ -139,8 +139,13 @@ settings it found.
 | `-swapiq` | off | Invert the RX spectrum convention (if a client shows it mirrored) |
 | `-txswapiq` | off | Invert the TX I/Q convention (if a client's tones come out mirrored) |
 | `-v` | off | Verbose console logging (a log file is always written to `-logdir`) |
+| `-logdir` | `logs` | Directory for the timestamped log files |
+| `-logfile` | | Log to this file instead of a timestamped one in `-logdir` |
+| `-rate` | 48000 | QMX audio sample rate (fixed at 48000 by the hardware) |
+| `-frames` | 240 | Frames per audio buffer (240 = 5 ms) |
 | `-list` | | List sound devices and serial ports, then exit |
 | `-probe 60s [-iq] [-playback]` | | Bench check: I/Q levels and QMX clock rates |
+| `-version` | | Print the version and exit |
 
 ## Transmit safety
 
