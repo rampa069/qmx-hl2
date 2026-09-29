@@ -259,11 +259,11 @@ func (t *transmitter) onMeter(r meterReading) {
 	slog.Debug("TX meter", "power_w", watts, "swr", swr, "tone", t.lastTone)
 	if r.protected {
 		// The QMX samples SWR every 1 ms and locks transmit above its threshold. On firmware
-		// 1_04_010 to 1_04_015 its key-down transient alone tripped it on a good antenna, with
-		// the threshold at 3 and also at 5 (2026-09-29).
+		// 1_04_010 to 1_04_015 its key-down transient alone tripped it on a good antenna with
+		// the threshold at 3 and 5, but not at 7 or 9 (QMX+, 2026-09-29).
 		slog.Error("the QMX's own SWR protection has locked transmit (CAT SR1): clear it on the radio " +
 			"(enter and leave the menu). On firmware 1_04_010-1_04_015 its key-down transient can trip it even with a good " +
-			"antenna (seen with thresholds 3 and 5); if the antenna is fine, disabling the QMX's SWR protection avoids it")
+			"antenna (seen with thresholds 3 and 5); if the antenna is fine, raising the QMX's SWR threshold to about 7 avoids it")
 		t.abort("QMX SWR protection")
 		return
 	}
