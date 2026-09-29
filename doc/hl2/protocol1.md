@@ -277,7 +277,8 @@ HL2 CW works in three ways.
    keyer is off. The radio treats it like SSB.
 
 For the QMX emulator, the most practical mapping is: (3) forward the IQ tone as audio.
-Better, detect CWX key bits (2) and key the QMX directly by CAT or its paddle input. For
+Better, detect CWX key bits (2) and key the QMX directly by CAT or its paddle input
+(implemented: each key edge becomes TX/TA or TA0, carrier on the TX frequency, 500 ms hang). For
 (1), the QMX's own key jack does the job.
 
 ---

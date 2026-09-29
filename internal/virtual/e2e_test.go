@@ -171,3 +171,52 @@ func TestParrotSSBEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// CWX end to end: the client enables CWX (C&C 0x0f bit 24) and keys with MOX off through
+// bit 0 of the TX I words. The QMX (virtual) must transmit a carrier on the TX frequency,
+// here 1 kHz above RX1, which the client decodes at -1 kHz.
+func TestParrotCWXEndToEnd(t *testing.T) {
+	const delay = time.Second
+	r := New(48000, 240, delay)
+	cat := qmx.NewClient(r.CAT())
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go cat.Run(catCtx)
+	cfg := engine.DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	out := &ep6Sink{}
+	e := engine.New(cfg, cat, r.Capture(), out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	const f0 = 7030000
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{f0, 0x04}, nil))                // RX1; 48 kHz, 1 RX
+	e.EP2(ep2([2]byte{0x01 << 1, 0x0f << 1}, [2]uint32{f0 + 1000, 1 << 24}, nil)) // TX freq; CWX on
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	time.Sleep(time.Second)
+
+	keyed := func() (float64, float64) { return 1.5 / 32767, 1.5 / 32767 } // bit 0 set in I and Q
+	idle := func() (float64, float64) { return 0, 0 }
+	send := func(d time.Duration, iq func() (float64, float64)) {
+		sent := out.n.Load()
+		for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(time.Millisecond) {
+			for ; sent < out.n.Load(); sent++ {
+				e.EP2(ep2([2]byte{0x01 << 1, 0x0f << 1}, [2]uint32{f0 + 1000, 1 << 24}, iq)) // MOX off
+			}
+		}
+	}
+	start := time.Now()
+	send(800*time.Millisecond, keyed)
+	send(900*time.Millisecond, idle) // past the 500 ms hang: the over ends
+	time.Sleep(time.Until(start.Add(delay + 700*time.Millisecond)))
+	from := time.Now()
+	time.Sleep(400 * time.Millisecond)
+	x := out.between(from, time.Now())
+	on, mirror := bin(x, -1000), bin(x, 1000)
+	if on < 1e-4 || on < 20*mirror {
+		t.Fatalf("CWX carrier: %.3g at -1 kHz, %.3g mirrored", on, mirror)
+	}
+}

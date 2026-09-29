@@ -734,3 +734,69 @@ func TestTXStopConfirmedAtOnce(t *testing.T) {
 		t.Fatalf("stop re-sent needlessly: %v", h.radio.log)
 	}
 }
+
+// sendCWX feeds d of MOX-off frames whose TX I words carry the CWX bits (key: bit 0, CWX PTT:
+// bit 3), with CWX enabled as given.
+func (h *harness) sendCWX(txFreq uint32, enabled, key, ptt bool, d time.Duration) {
+	var bits int16
+	if key {
+		bits |= cwxKey
+	}
+	if ptt {
+		bits |= cwxPTT
+	}
+	frames := int(d.Seconds() * 48000 / hpsdr.SamplesPerEP2Frm)
+	for i := 0; i < frames; i++ {
+		var f txFrame
+		f.cwx, f.txFreq = enabled, txFreq
+		for k := range f.iq {
+			f.iq[k] = [2]int16{bits, bits} // Thetis writes the bits into every word
+		}
+		h.tx.frame(context.Background(), f)
+		h.clock = h.clock.Add(time.Second * hpsdr.SamplesPerEP2Frm / 48000)
+		h.tx.tick(context.Background())
+	}
+}
+
+// CWX: the host keys with MOX off. The QMX carries the carrier exactly on the TX frequency
+// (dial 1500 Hz below, TA 1500), key edges become TA0 / TX+TA, and the over ends after the
+// gateware's 500 ms hang without key or CWX PTT.
+func TestTXCWXKeying(t *testing.T) {
+	h := newHarness(t)
+	const f0 = 7030000
+	h.sendCWX(f0, true, true, true, 180*time.Millisecond)   // dah
+	h.sendCWX(f0, true, false, true, 60*time.Millisecond)   // gap, CWX PTT held
+	h.sendCWX(f0, true, true, true, 60*time.Millisecond)    // dit
+	h.sendCWX(f0, true, false, false, 300*time.Millisecond) // within the hang: still an over
+	if h.tx.state != txOn {
+		t.Fatalf("over ended inside the hang: state %v", h.tx.state)
+	}
+	h.sendCWX(f0, true, false, false, 400*time.Millisecond) // past the hang
+	if h.tx.state != txIdle || h.tx.cwxOn {
+		t.Fatalf("over not ended after the hang: state %v cwx %v", h.tx.state, h.tx.cwxOn)
+	}
+	h.idle(100 * time.Millisecond) // confirm the stop
+	want := []string{"FA7028500", "TX", "TA1500.00", "TA0.00", "TX", "TA1500.00", "TA0.00"}
+	got := h.radio.log
+	if len(got) < len(want) {
+		t.Fatalf("radio log %v, want it to start with %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("radio log %v, want it to start with %v", got, want)
+		}
+	}
+	if h.radio.keyed {
+		t.Fatal("QMX still keyed")
+	}
+}
+
+// CWX bits are ignored unless the host enabled CWX, and the CWX PTT alone does not key.
+func TestTXCWXNeedsEnableAndKey(t *testing.T) {
+	h := newHarness(t)
+	h.sendCWX(7030000, false, true, true, 200*time.Millisecond)
+	h.sendCWX(7030000, true, false, true, 200*time.Millisecond)
+	if h.radio.count("TX") != 0 {
+		t.Fatalf("keyed: %v", h.radio.log)
+	}
+}

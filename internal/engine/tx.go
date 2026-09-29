@@ -87,6 +87,7 @@ func DefaultTXConfig() TXConfig {
 
 type txFrame struct {
 	mox    bool
+	cwx    bool // CWX enabled (C&C 0x0f bit 24): the host may key CW with MOX off
 	txFreq uint32
 	iq     [hpsdr.SamplesPerEP2Frm][2]int16
 }
@@ -125,6 +126,11 @@ type transmitter struct {
 	// lost TA0/RX (a USB serial hiccup) would otherwise leave it keyed, and the engine's
 	// retuning would keep feeding the QMX's CAT watchdog (seen in another QMX project,
 	// groups.io QRPLabs topic 119565643). Until then the engine still sees TX as active.
+	// CWX: the host keys CW with MOX off through bits in the TX I words (the HL2 gateware
+	// shapes the carrier itself); here each key edge becomes TX/TA or TA0.
+	cwxOn   bool
+	cwxLast time.Time // last frame with the key or the CWX PTT set
+
 	stopping     bool
 	stopTone     bool // the over was a tone: re-send TA0 as well as RX
 	stopAttempts int
@@ -311,6 +317,15 @@ func (t *transmitter) onMeter(r meterReading) {
 
 func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	now := t.now()
+	if !f.mox && (t.cwxOn || f.cwx && cwxBits(f) != 0) {
+		t.cwxFrame(f, now)
+		return
+	}
+	if t.cwxOn { // MOX during a CWX over: end it; the next frames start a normal over
+		t.cwxOn = false
+		t.keyUp("MOX during CWX")
+		return
+	}
 	if !f.mox {
 		if t.state != txIdle {
 			t.keyUp("MOX released")
@@ -594,6 +609,7 @@ func (t *transmitter) abort(reason string) {
 }
 
 func (t *transmitter) keyUp(reason string) {
+	t.cwxOn = false
 	was := t.state
 	t.stopTone = !t.voice
 	t.state = txIdle
@@ -625,6 +641,53 @@ func (t *transmitter) keyUp(reason string) {
 		t.stopping, t.stopAttempts, t.stopNext, t.stopWarned = true, 0, t.now(), time.Time{}
 	} else if was != txIdle {
 		slog.Info("TX request ended", "reason", reason)
+	}
+}
+
+// CWX bits in the low byte of each TX I word (HL2 gateware dsopenhpsdr1.sv and radio.sv):
+// bit 0 keys the carrier, bit 3 is the CWX PTT that holds TX between elements. After the last
+// of either, the gateware keeps TX up for its 500 ms hang.
+const (
+	cwxKey  = 1 << 0
+	cwxPTT  = 1 << 3
+	cwxHang = 500 * time.Millisecond
+)
+
+// cwxBits ORs the CWX bits of a frame's samples.
+func cwxBits(f txFrame) int16 {
+	var b int16
+	for _, s := range f.iq {
+		b |= s[0] & (cwxKey | cwxPTT)
+	}
+	return b
+}
+
+// cwxFrame keys the QMX from a CWX frame: a carrier exactly on the TX frequency, on while the
+// key bit is set, like the HL2's own CWX output.
+func (t *transmitter) cwxFrame(f txFrame, now time.Time) {
+	bits := cwxBits(f)
+	key := bits&cwxKey != 0
+	if !t.cwxOn {
+		if t.stopping || t.state != txIdle || !key {
+			return
+		}
+		t.cwxOn, t.cwxLast, t.lastMox = true, now, now
+		t.voice = false
+		slog.Info("CWX keying from the host", "tx_freq", f.txFreq)
+		t.keyDown(f.txFreq, 0, now) // dial = TX - 1500 Hz, TA 1500: the carrier on the TX frequency
+		return
+	}
+	t.lastMox = now // frames keep coming, so the starvation watchdog stays quiet
+	if bits != 0 {
+		t.cwxLast = now
+	}
+	if !f.cwx || now.Sub(t.cwxLast) > cwxHang {
+		t.cwxOn = false
+		t.keyUp("CWX idle")
+		return
+	}
+	if t.state == txOn {
+		t.follow(f.txFreq, 0, key, now)
 	}
 }
 

@@ -210,7 +210,7 @@ func (e *Engine) EP2(pkt []byte) {
 			e.acks = append(e.acks, f.CC)
 		}
 		if e.tx != nil {
-			e.tx.submit(txFrame{mox: f.CC.MOX, txFreq: e.state.TXFreq, iq: f.TXIQ})
+			e.tx.submit(txFrame{mox: f.CC.MOX, cwx: e.state.CWX, txFreq: e.state.TXFreq, iq: f.TXIQ})
 		} else if f.CC.MOX && !e.moxWarned {
 			e.moxWarned = true
 			slog.Warn("host requested TX (MOX); transmit is disabled (start with -tx), ignoring")

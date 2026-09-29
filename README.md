@@ -21,7 +21,7 @@ built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 | Discovery as a Hermes-Lite 2 | works |
 | RX spectrum/waterfall at 48/96/192/384 kHz | works (the QMX itself covers 48 kHz) |
 | FT8 / FT4 / WSPR / JS8 transmit | works: complete FT8 QSOs, spots on PSK Reporter |
-| CW transmit | works (client-generated CW keyed through the QMX) |
+| CW transmit | works: client-generated CW keyed through the QMX; CWX (host keying with MOX off) tested with the virtual QMX |
 | SSB voice transmit | works |
 | SSTV transmit | works: pictures received straight by remote stations |
 | FreeDV RADE V1 transmit | works: first QSO on 28 Sep 2026 with EC7C on 40 m, good reports (Zeus's built-in RADE); the first FreeDV QSO for both stations |
@@ -52,6 +52,9 @@ transmission:
 - **Single tone** (FT8, FT4, WSPR, JS8, CW, TUNE): the daemon tracks the instantaneous frequency
   and sends it to the QMX with the CAT tone command (`TA`). The QMX stays in Digi mode and
   generates a clean, keyed carrier at exactly the right frequency.
+- **CWX** (host keying with MOX off, as clients do with the HL2's internal keyer): each key
+  edge in the TX I words keys the QMX with the tone command, carrier exactly on the TX
+  frequency; the over ends after the same 500 ms hang as the HL2 gateware.
 - **Anything else** (voice, SSTV, FreeDV, PSK, RTTY, two-tone): the QMX is switched to USB or LSB with USB
   audio as the source. During the over the client's TX pacing is locked to the QMX's playback
   clock, so its audio goes through a small buffer at a constant delay, without resampling
