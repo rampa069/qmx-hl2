@@ -98,6 +98,9 @@ type Engine struct {
 	tune     chan struct{}
 	playback audio.PlaybackStream
 
+	presaved map[string]string // original QMX state from an earlier connection
+	orig     map[string]string // original QMX state, as restored on exit
+
 	ep2Count, ep6Count atomic.Int64 // packet counters for the rate log
 	capFrames          atomic.Int64 // QMX frames captured
 
@@ -259,20 +262,50 @@ func (e *Engine) Run(ctx context.Context) error {
 	return err
 }
 
+// SetSavedState gives the QMX state saved by an earlier engine (see SavedState), to be restored
+// on exit instead of reading it again. After a USB reconnect the QMX still holds this daemon's
+// settings (IQ mode, CAT watchdog, SSB source), which must not be taken for the user's own.
+func (e *Engine) SetSavedState(m map[string]string) { e.presaved = m }
+
+// SavedState returns the QMX state saved when Run set up the radio (nil before that).
+func (e *Engine) SavedState() map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.orig
+}
+
+// readOrig returns the QMX's original value for a CAT query key, from the saved state if one
+// was given, otherwise by asking the radio.
+func (e *Engine) readOrig(ctx context.Context, key string) (string, error) {
+	if v, ok := e.presaved[key]; ok {
+		return v, nil
+	}
+	return e.cat.Query(ctx, key+";")
+}
+
 func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 	orig := map[string]string{}
+	defer func() {
+		e.mu.Lock()
+		e.orig = orig
+		e.mu.Unlock()
+	}()
 	for _, c := range []string{"FA", "MD", "Q9"} {
-		r, err := e.cat.Query(ctx, c+";")
+		r, err := e.readOrig(ctx, c)
 		if err != nil {
 			return nil, fmt.Errorf("read QMX %s: %w", c, err)
 		}
 		orig[c] = r
 	}
-	slog.Info("QMX state saved", "fa", orig["FA"], "md", orig["MD"], "q9", orig["Q9"])
+	if e.presaved != nil {
+		slog.Info("QMX state kept from the first connection", "fa", orig["FA"], "md", orig["MD"], "q9", orig["Q9"])
+	} else {
+		slog.Info("QMX state saved", "fa", orig["FA"], "md", orig["MD"], "q9", orig["Q9"])
+	}
 	keys := []string{"MD", "FA", "Q9"}
 	if e.tx != nil {
 		for _, c := range []string{"QB", "QC"} {
-			r, err := e.cat.Query(ctx, c+";")
+			r, err := e.readOrig(ctx, c)
 			if err != nil {
 				return nil, fmt.Errorf("read QMX %s: %w", c, err)
 			}
@@ -280,7 +313,7 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 		}
 		keys = append(keys, "QC", "QB")
 		if e.tx.ssb != nil {
-			r, err := e.cat.Query(ctx, "SS;")
+			r, err := e.readOrig(ctx, "SS")
 			if err != nil {
 				return nil, fmt.Errorf("read QMX SS: %w", err)
 			}

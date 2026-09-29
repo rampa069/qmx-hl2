@@ -126,6 +126,11 @@ make release-binaries # all of the above
 On exit (Ctrl-C) the daemon puts the QMX back to the frequency, mode, IQ-mode and CAT-watchdog
 settings it found.
 
+If the QMX's USB goes away while the daemon runs (cable unplugged, power cycle, firmware
+update), the daemon keeps answering the client, retries every 2 s, and carries on when the
+QMX is back; the client does not have to reconnect. The QMX must be present when the daemon
+starts.
+
 ## Options
 
 | Option | Default | Meaning |

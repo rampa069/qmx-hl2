@@ -275,46 +275,6 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	}
 	id.MAC = mac
 
-	// The QMX: the real one on USB, or with -parrot a virtual one that replays each
-	// transmission to the client (no serial port, no sound card, nothing on the air).
-	var (
-		port     qmx.ReadWriter
-		capt     audio.CaptureStream
-		openPlay func() (audio.PlaybackStream, error)
-		dev      string
-	)
-	if cfg.Parrot > 0 {
-		vr := virtual.New(cfg.SampleRate, cfg.Frames, cfg.Parrot)
-		port, capt, dev = vr.CAT(), vr.Capture(), "virtual (parrot)"
-		openPlay = func() (audio.PlaybackStream, error) { return vr.Playback(), nil }
-	} else {
-		dev, err = serial.FindQMX(cfg.SerialPort)
-		if err != nil {
-			return err
-		}
-		sp := serial.NewPort(serial.DefaultBaud)
-		if err := sp.Open(dev); err != nil {
-			return err
-		}
-		defer sp.Close()
-		port = sp
-
-		be := audio.NewPABackend()
-		if err := be.Init(); err != nil {
-			return fmt.Errorf("init audio: %w", err)
-		}
-		defer be.Terminate()
-		c, err := be.OpenCapture(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
-		if err != nil {
-			return err
-		}
-		defer c.Close()
-		capt = c
-		openPlay = func() (audio.PlaybackStream, error) {
-			return be.OpenPlayback(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
-		}
-	}
-
 	ecfg := engine.DefaultConfig()
 	ecfg.SampleRate = cfg.SampleRate
 	ecfg.Frames = cfg.Frames
@@ -335,32 +295,27 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		ecfg.TX.SwapIQ = !ecfg.TX.SwapIQ
 	}
 
-	// The CAT client outlives the engine so the engine can restore the radio on exit.
-	cat := qmx.NewClient(port)
-	catCtx, catCancel := context.WithCancel(context.Background())
-	catDone := make(chan error, 1)
-	go func() { catDone <- cat.Run(catCtx) }()
-	defer func() { catCancel(); <-catDone }()
-
-	// The engine sends through the server's socket, and the server calls the engine.
-	var srv *hpsdr.Server
-	eng := engine.New(ecfg, cat, capt, senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) }))
-	if cfg.TX && cfg.TXMode != "tone" {
-		pb, err := openPlay()
-		if err != nil {
-			return fmt.Errorf("SSB transmit needs QMX audio playback: %w", err)
-		}
-		defer pb.Close()
-		eng.SetPlayback(pb)
-	}
-	srv, err = hpsdr.NewServer(id, eng, cfg.Watchdog)
+	// The first connection to the QMX must work: a missing radio at start is more likely a
+	// setup mistake than a glitch.
+	sess, err := openSession(cfg)
 	if err != nil {
 		return err
 	}
-	if err := srv.Listen(cfg.Listen); err != nil {
+
+	// The HPSDR server (and so the client's session) lives for the whole run; the engine
+	// behind it is replaced when the QMX reconnects.
+	proxy := &handlerProxy{}
+	srv, err := hpsdr.NewServer(id, proxy, cfg.Watchdog)
+	if err != nil {
+		sess.close()
 		return err
 	}
-	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s) with QMX on %s; Ctrl-C to stop\n", srv.LocalAddr(), id.MAC, dev)
+	if err := srv.Listen(cfg.Listen); err != nil {
+		sess.close()
+		return err
+	}
+	send := senderFunc(func(p []byte, to netip.AddrPort) error { return srv.Send(p, to) })
+	fmt.Printf("emulating Hermes-Lite 2 on udp %s (MAC %s) with QMX on %s; Ctrl-C to stop\n", srv.LocalAddr(), id.MAC, sess.dev)
 	if cfg.Parrot > 0 {
 		fmt.Printf("PARROT: nothing is transmitted; each transmission is replayed to the client %s after it starts\n", cfg.Parrot)
 	} else if cfg.TX {
@@ -373,12 +328,86 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	defer cancel()
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.Serve(ctx) }()
-	err = eng.Run(ctx)
+
+	var saved map[string]string // the QMX's original state, from the first connection
+	for {
+		err = sess.run(ctx, ecfg, proxy, send, &saved, cfg.TX, cfg.TXMode)
+		sess.close()
+		if ctx.Err() != nil || !errors.Is(err, errQMXLost) {
+			break
+		}
+		slog.Error("lost the QMX; waiting for it to come back", "err", err)
+		fmt.Fprintf(os.Stderr, "lost the QMX (%v); waiting for it to come back\n", err)
+		if sess, err = waitForQMX(ctx, cfg); err != nil {
+			break
+		}
+		slog.Warn("QMX reconnected", "device", sess.dev)
+		fmt.Fprintf(os.Stderr, "QMX reconnected on %s\n", sess.dev)
+	}
 	cancel()
-	if serr := <-srvErr; err == nil {
+	if serr := <-srvErr; err == nil || errors.Is(err, context.Canceled) {
 		err = serr
 	}
 	return err
+}
+
+// openSession opens the QMX: the real one on USB, or with -parrot a virtual one that replays
+// each transmission to the client (no serial port, no sound card, nothing on the air).
+func openSession(cfg *config.Config) (*qmxSession, error) {
+	s := &qmxSession{}
+	if cfg.Parrot > 0 {
+		vr := virtual.New(cfg.SampleRate, cfg.Frames, cfg.Parrot)
+		s.dev, s.port, s.capt = "virtual (parrot)", vr.CAT(), vr.Capture()
+		s.play = func() (audio.PlaybackStream, error) { return vr.Playback(), nil }
+		return s, nil
+	}
+	dev, err := serial.FindQMX(cfg.SerialPort)
+	if err != nil {
+		return nil, err
+	}
+	sp := serial.NewPort(serial.DefaultBaud)
+	if err := sp.Open(dev); err != nil {
+		return nil, err
+	}
+	s.dev, s.port = dev, sp
+	s.closers = append(s.closers, func() { _ = sp.Close() })
+
+	// A fresh PortAudio instance each time: it only sees devices present when it starts.
+	be := audio.NewPABackend()
+	if err := be.Init(); err != nil {
+		s.close()
+		return nil, fmt.Errorf("init audio: %w", err)
+	}
+	s.closers = append(s.closers, be.Terminate)
+	c, err := be.OpenCapture(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+	if err != nil {
+		s.close()
+		return nil, err
+	}
+	s.closers = append(s.closers, func() { _ = c.Close() })
+	s.capt = c
+	s.play = func() (audio.PlaybackStream, error) {
+		return be.OpenPlayback(cfg.AudioDevice, cfg.SampleRate, cfg.Frames)
+	}
+	return s, nil
+}
+
+// waitForQMX retries openSession every 2 s until the QMX is back or ctx ends.
+func waitForQMX(ctx context.Context, cfg *config.Config) (*qmxSession, error) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-t.C:
+		}
+		s, err := openSession(cfg)
+		if err == nil {
+			return s, nil
+		}
+		slog.Debug("QMX not back yet", "err", err)
+	}
 }
 
 type senderFunc func([]byte, netip.AddrPort) error
