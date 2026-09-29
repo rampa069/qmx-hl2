@@ -288,6 +288,7 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	ecfg.IQBalance = cfg.IQBal
 	ecfg.NoiseFill = cfg.NoiseFill
 	ecfg.LOOffset = cfg.LOOffset
+	ecfg.TuneWindow = cfg.TuneWindow
 	ecfg.TX.SSBGain = math.Pow(10, cfg.SSBGain/20)
 	ecfg.TX.WAVDir = cfg.TXWAVDir
 	ecfg.TX.Virtual = cfg.Parrot > 0

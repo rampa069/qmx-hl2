@@ -149,6 +149,7 @@ starts.
 | `-rxgain` | 0 | dB of digital gain on receive I/Q |
 | `-iqbal` | on | Correct QMX I/Q gain/phase mismatch |
 | `-noisefill` | on | Fill the band outside the QMX's 48 kHz with low-level noise |
+| `-tunewindow` | 15000 | At client rates above 48 kHz, Hz RX1 may move from the QMX's I/Q centre before the QMX is retuned; inside it the receivers follow digitally, with no glitch. At 48 kHz every change retunes. `0` retunes on every change |
 | `-looffset` | 0 | Hz between RX1 and the QMX's I/Q centre (e.g. `-4000` moves its low-frequency noise hump off the display centre) |
 | `-swapiq` | off | Invert the RX spectrum convention (if a client shows it mirrored) |
 | `-txswapiq` | off | Invert the TX I/Q convention (if a client's tones come out mirrored) |

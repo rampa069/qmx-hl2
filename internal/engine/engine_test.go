@@ -525,3 +525,60 @@ func TestEngineEP6PacedByPlaybackDuringSSB(t *testing.T) {
 		t.Errorf("SSB audio: underruns %d, discarded %d, resampled %+.1f ppm; want all 0", u, disc, ppm)
 	}
 }
+
+// Retune hysteresis: above 48 kHz the QMX stays put while RX1 moves inside the window and the
+// receiver NCO follows digitally; beyond it, or at 48 kHz, the QMX is retuned.
+func TestEngineTuneHysteresis(t *testing.T) {
+	run := func(rateCode uint32, moves []uint32) (dials []string, e *Engine, out *capSender, stop func()) {
+		cat := newFakeCAT()
+		cfg := DefaultConfig()
+		cfg.IQSettle = 0
+		client := qmx.NewClient(cat)
+		catCtx, catCancel := context.WithCancel(context.Background())
+		go client.Run(catCtx)
+		out = &capSender{}
+		e = New(cfg, client, &fakeCapture{frames: 240, toneHz: 3000}, out)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error)
+		go func() { done <- e.Run(ctx) }()
+		e.EP2(ep2([2]byte{0x00, 0x02 << 1}, [2]uint32{rateCode<<24 | 0x04, 14074000}))
+		e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+		waitFor(t, func() bool { return cat.get("FA") == "FA00014086000;" }, "first tune")
+		dials = append(dials, cat.get("FA"))
+		for _, f := range moves {
+			e.EP2(ep2([2]byte{0x02 << 1, 0x02 << 1}, [2]uint32{f, f}))
+			time.Sleep(150 * time.Millisecond)
+			dials = append(dials, cat.get("FA"))
+		}
+		return dials, e, out, func() { cancel(); <-done; catCancel() }
+	}
+
+	// 192 kHz: +5 kHz stays, +25 kHz retunes.
+	dials, _, out, stop := run(0x02, []uint32{14079000})
+	out.take()
+	time.Sleep(300 * time.Millisecond)
+	pkts := out.take()
+	if dials[1] != "FA00014086000;" {
+		stop()
+		t.Fatalf("192 kHz: RX1 +5 kHz retuned the QMX to %s", dials[1])
+	}
+	// The QMX tone at IQ +3000 Hz is RF 14.077 MHz: 2 kHz below RX1 (14.079), which the
+	// client decodes (mirrored) at +2000 Hz.
+	x := decode(pkts, 1, 0)
+	if a := toneAt(x, 2000, 192000); a < 0.45 {
+		t.Errorf("192 kHz: tone not followed digitally: %g at +2000 Hz", a)
+	}
+	stop()
+	dials, _, _, stop = run(0x02, []uint32{14099000})
+	stop()
+	if dials[1] != "FA00014111000;" {
+		t.Errorf("192 kHz: RX1 +25 kHz: dial %s, want a retune to 14.111 MHz", dials[1])
+	}
+
+	// 48 kHz: every change retunes.
+	dials, _, _, stop = run(0x00, []uint32{14079000})
+	stop()
+	if dials[1] != "FA00014091000;" {
+		t.Errorf("48 kHz: RX1 +5 kHz: dial %s, want a retune to 14.091 MHz", dials[1])
+	}
+}

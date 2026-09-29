@@ -25,21 +25,22 @@ type Config struct {
 	Verbose     bool
 
 	// Protocol 1 server.
-	Listen    string        // UDP listen address, normally ":1024"
-	MAC       string        // MAC reported in discovery replies
-	Watchdog  time.Duration // stop streaming after this long without EP2 packets
-	RXGainDB  float64       // digital gain on QMX IQ
-	SwapIQ    bool          // swap I and Q if the spectrum appears mirrored
-	TX        bool          // allow the QMX to transmit when the client keys MOX
-	TXSwapIQ  bool          // swap the host's TX I and Q words
-	TXMode    string        // auto, tone or ssb
-	MaxTX     time.Duration // longest continuous transmission
-	IQBal     bool          // blind I/Q balance correction
-	NoiseFill bool          // fill the band outside the QMX's 48 kHz with low-level noise
-	LOOffset  int           // Hz between RX1 and the QMX IQ centre
-	SSBGain   float64       // dB applied to SSB transmit audio
-	TXWAVDir  string        // if set, each SSB over's audio as played to the QMX is saved here
-	Parrot    time.Duration // if set, use a virtual QMX that replays each transmission after this delay
+	Listen     string        // UDP listen address, normally ":1024"
+	MAC        string        // MAC reported in discovery replies
+	Watchdog   time.Duration // stop streaming after this long without EP2 packets
+	RXGainDB   float64       // digital gain on QMX IQ
+	SwapIQ     bool          // swap I and Q if the spectrum appears mirrored
+	TX         bool          // allow the QMX to transmit when the client keys MOX
+	TXSwapIQ   bool          // swap the host's TX I and Q words
+	TXMode     string        // auto, tone or ssb
+	MaxTX      time.Duration // longest continuous transmission
+	IQBal      bool          // blind I/Q balance correction
+	NoiseFill  bool          // fill the band outside the QMX's 48 kHz with low-level noise
+	LOOffset   int           // Hz between RX1 and the QMX IQ centre
+	TuneWindow int           // Hz RX1 may move before the QMX is retuned (above 48 kHz)
+	SSBGain    float64       // dB applied to SSB transmit audio
+	TXWAVDir   string        // if set, each SSB over's audio as played to the QMX is saved here
+	Parrot     time.Duration // if set, use a virtual QMX that replays each transmission after this delay
 
 	// One-shot modes.
 	List          bool          // list audio devices and serial ports, then exit
@@ -75,6 +76,7 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	fs.DurationVar(&c.MaxTX, "maxtx", 3*time.Minute, "longest continuous transmission before TX is cut (e.g. 5m for long SSTV modes)")
 	fs.BoolVar(&c.IQBal, "iqbal", true, "correct QMX I/Q gain/phase mismatch (improves image rejection)")
 	fs.BoolVar(&c.NoiseFill, "noisefill", true, "at 96/192/384 kHz, fill the band the QMX cannot cover with low-level noise")
+	fs.IntVar(&c.TuneWindow, "tunewindow", 15000, "at client rates above 48 kHz, Hz RX1 may move from the QMX's I/Q centre before the QMX is retuned (0 = retune on every change)")
 	fs.IntVar(&c.LOOffset, "looffset", 0, "Hz between RX1 and the QMX IQ centre (e.g. -4000 moves the QMX's noise hump off the display centre)")
 	fs.BoolVar(&c.List, "list", false, "list audio devices and serial ports, then exit")
 	fs.DurationVar(&c.Probe, "probe", 0, "capture for this long (e.g. 10s), report IQ levels and measured sample rate, then exit")
@@ -100,6 +102,9 @@ func Parse(args []string, out io.Writer) (*Config, error) {
 	}
 	if c.LOOffset < -20000 || c.LOOffset > 20000 {
 		return nil, fmt.Errorf("-looffset must be within +-20000 Hz")
+	}
+	if c.TuneWindow < 0 || c.TuneWindow > 20000 {
+		return nil, fmt.Errorf("-tunewindow must be within 0-20000 Hz")
 	}
 	if c.Watchdog < 0 {
 		return nil, fmt.Errorf("-watchdog must not be negative")

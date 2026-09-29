@@ -53,6 +53,11 @@ type Config struct {
 	// output band at 96/192/384 kHz, so the part the QMX cannot cover looks like a quiet band
 	// instead of a black hole.
 	NoiseFill bool
+	// TuneWindow is how far RX1 may move from the QMX's I/Q centre before the QMX is retuned;
+	// inside it the receiver NCOs follow digitally. It only applies above 48 kHz: at 48 kHz
+	// the stream is not upsampled, so any offset folds the far edge of the QMX's band into
+	// view. 0 retunes on every RX1 change.
+	TuneWindow int
 	// LOOffset places the QMX's IQ centre this many Hz from RX1 (e.g. -4000), moving the
 	// QMX's strong low-frequency noise hump away from the middle of the display.
 	LOOffset int
@@ -63,7 +68,7 @@ type Config struct {
 // DefaultConfig returns bench-derived defaults.
 func DefaultConfig() Config {
 	return Config{SampleRate: 48000, Frames: 240, DCCornerHz: 20, IFOffset: 12000, IQSettle: time.Second, MirrorOutput: true,
-		IQBalance: true, NoiseFill: true, TX: DefaultTXConfig()}
+		IQBalance: true, NoiseFill: true, TuneWindow: 15000, TX: DefaultTXConfig()}
 }
 
 // Sender transmits an EP6 packet to the client.
@@ -262,6 +267,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	return err
 }
 
+// tuneWindow returns the retune hysteresis for a client rate (see Config.TuneWindow).
+func (e *Engine) tuneWindow(rate int) int {
+	if rate <= e.cfg.SampleRate {
+		return 0
+	}
+	return e.cfg.TuneWindow
+}
+
 // SetSavedState gives the QMX state saved by an earlier engine (see SavedState), to be restored
 // on exit instead of reading it again. After a USB reconnect the QMX still holds this daemon's
 // settings (IQ mode, CAT watchdog, SSB source), which must not be taken for the user's own.
@@ -397,6 +410,8 @@ func (e *Engine) catLoop(ctx context.Context) {
 		case <-e.tune:
 			e.mu.Lock()
 			rx1 := e.state.RX1Freq()
+			rate := e.state.SampleRate
+			lo := e.lo
 			busy := e.txActive
 			verify := false
 			if e.forceTune && !busy {
@@ -409,6 +424,12 @@ func (e *Engine) catLoop(ctx context.Context) {
 				continue // after TX, setTXActive(false) requests a retune
 			}
 			centre := uint32(int64(rx1) + int64(e.cfg.LOOffset))
+			// Hysteresis: while RX1 stays inside the window, keep the QMX where it is and let
+			// the receiver NCOs follow digitally, instead of retuning (a CAT round trip and a
+			// glitch in the I/Q) on every click. After TX the same centre is restored.
+			if w := e.tuneWindow(rate); w > 0 && lo != 0 && math.Abs(float64(centre)-lo) <= float64(w) {
+				centre = uint32(lo)
+			}
 			want := centre + uint32(e.cfg.IFOffset)
 			if want == dial {
 				continue
