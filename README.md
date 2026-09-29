@@ -172,6 +172,9 @@ settings it found.
 
   After any of these, TX stays off until the client releases MOX. A tone over that reads 0 W
   also logs a warning, since the QMX may have locked transmit for another reason.
+- Every key-up is confirmed with CAT `TQ`. If the stop command is lost (for example a USB
+  serial hiccup), it is re-sent until the QMX reports receive, and nothing else is sent to it
+  meanwhile, so its CAT watchdog can still unkey it.
 
 ## Limitations and notes
 

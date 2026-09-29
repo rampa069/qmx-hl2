@@ -29,6 +29,8 @@ type TXRadio interface {
 	// SWRProtection reports whether the QMX's own SWR protection has locked transmit (CAT SR,
 	// firmware 1_04_004 or later).
 	SWRProtection(ctx context.Context) (bool, error)
+	// Transmitting reports the QMX's TX state (CAT TQ).
+	Transmitting(ctx context.Context) (bool, error)
 }
 
 // TXConfig controls the transmit path. The QMX transmits a single tone whose frequency is set
@@ -119,7 +121,16 @@ type transmitter struct {
 	lastSent   time.Time
 	highSWR    int
 	zeroWarned bool // the 0 W warning was given this over
-	armedFreq  uint32
+	// After key-up the stop is confirmed with CAT TQ and re-sent until the QMX reports RX: a
+	// lost TA0/RX (a USB serial hiccup) would otherwise leave it keyed, and the engine's
+	// retuning would keep feeding the QMX's CAT watchdog (seen in another QMX project,
+	// groups.io QRPLabs topic 119565643). Until then the engine still sees TX as active.
+	stopping     bool
+	stopTone     bool // the over was a tone: re-send TA0 as well as RX
+	stopAttempts int
+	stopNext     time.Time
+	stopWarned   time.Time
+	armedFreq    uint32
 
 	lastPower, lastSWRVal float64
 	// per-transmission statistics, logged at key-up
@@ -181,7 +192,16 @@ func (t *transmitter) submit(f txFrame) {
 func (t *transmitter) run(ctx context.Context) {
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
-	defer t.keyUp("shutdown")
+	defer func() {
+		t.keyUp("shutdown")
+		// No ticks follow; the engine's restore sends RX on its way out anyway.
+		if t.stopping {
+			t.stopping = false
+			if t.active != nil {
+				t.active(false)
+			}
+		}
+	}()
 	// Meter queries can take up to the CAT timeout; run them off the frame path so tone
 	// updates never stall behind them.
 	readings := make(chan meterReading, 1)
@@ -296,6 +316,9 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 			t.keyUp("MOX released")
 		}
 		return
+	}
+	if t.stopping {
+		return // the previous over's stop is not confirmed yet
 	}
 	t.lastMox = now
 	if t.dump != nil {
@@ -541,10 +564,14 @@ func (t *transmitter) follow(txFreq uint32, bb float64, signal bool, now time.Ti
 }
 
 func (t *transmitter) tick(ctx context.Context) {
+	now := t.now()
+	if t.stopping {
+		t.confirmStop(ctx, now)
+		return
+	}
 	if t.state == txIdle {
 		return
 	}
-	now := t.now()
 	if now.Sub(t.lastMox) > t.cfg.Starve {
 		t.keyUp("no MOX frames from host")
 		return
@@ -568,6 +595,7 @@ func (t *transmitter) abort(reason string) {
 
 func (t *transmitter) keyUp(reason string) {
 	was := t.state
+	t.stopTone = !t.voice
 	t.state = txIdle
 	t.keyed.Store(false)
 	if was == txOn {
@@ -594,11 +622,44 @@ func (t *transmitter) keyUp(reason string) {
 		slog.Info("TX off", "reason", reason, "duration", t.now().Sub(t.onSince).Round(time.Millisecond),
 			"key_downs", t.statKeyDowns, "tone_cmds", t.statTones, "max_level", math.Round(t.statMaxLevel*1000)/1000,
 			"max_qmx_watts", t.statRawWatts)
+		t.stopping, t.stopAttempts, t.stopNext, t.stopWarned = true, 0, t.now(), time.Time{}
+	} else if was != txIdle {
+		slog.Info("TX request ended", "reason", reason)
+	}
+}
+
+// stopRetry is the interval between attempts to confirm (and re-send) the stop after key-up.
+const stopRetry = 200 * time.Millisecond
+
+// confirmStop checks with CAT TQ that the QMX left TX; until it does, it re-sends the stop
+// on every attempt. Only then is the engine told that TX has ended.
+func (t *transmitter) confirmStop(ctx context.Context, now time.Time) {
+	if now.Before(t.stopNext) {
+		return
+	}
+	t.stopNext = now.Add(stopRetry)
+	if t.stopAttempts > 0 {
+		if t.stopTone {
+			_ = t.radio.Tone(0)
+		}
+		_ = t.radio.RX()
+	}
+	keyed, err := t.radio.Transmitting(ctx)
+	if err == nil && !keyed {
+		if t.stopAttempts > 0 {
+			slog.Warn("the QMX confirmed receive after the stop was re-sent", "attempts", t.stopAttempts)
+		}
+		t.stopping = false
 		if t.active != nil {
 			t.active(false)
 		}
-	} else if was != txIdle {
-		slog.Info("TX request ended", "reason", reason)
+		return
+	}
+	t.stopAttempts++
+	if t.stopWarned.IsZero() || now.Sub(t.stopWarned) >= 5*time.Second {
+		t.stopWarned = now
+		slog.Error("the QMX may still be transmitting: its return to receive is not confirmed; re-sending TA0/RX",
+			"tq_keyed", keyed, "err", err, "attempts", t.stopAttempts)
 	}
 }
 

@@ -23,17 +23,44 @@ type fakeTXRadio struct {
 	log []string
 	swr float64
 	sr  bool // SWR protection locked (CAT SR1)
+	// keyed is the QMX's TX state as TQ reports it. lostStops RX/TA0 commands are lost (the
+	// serial link fails them), and tqErrs TQ queries time out.
+	keyed     bool
+	lostStops int
+	tqErrs    int
 }
 
 func (r *fakeTXRadio) SetFreqA(hz uint32) error {
 	r.log = append(r.log, fmt.Sprintf("FA%d", hz))
 	return nil
 }
-func (r *fakeTXRadio) TX() error { r.log = append(r.log, "TX"); return nil }
-func (r *fakeTXRadio) RX() error { r.log = append(r.log, "RX"); return nil }
-func (r *fakeTXRadio) Tone(hz float64) error {
-	r.log = append(r.log, fmt.Sprintf("TA%.2f", hz))
+func (r *fakeTXRadio) TX() error { r.log = append(r.log, "TX"); r.keyed = true; return nil }
+func (r *fakeTXRadio) RX() error {
+	if r.lostStops > 0 {
+		r.lostStops--
+		return errors.New("serial write failed")
+	}
+	r.log = append(r.log, "RX")
+	r.keyed = false
 	return nil
+}
+func (r *fakeTXRadio) Tone(hz float64) error {
+	if hz < 10 && r.lostStops > 0 {
+		r.lostStops--
+		return errors.New("serial write failed")
+	}
+	r.log = append(r.log, fmt.Sprintf("TA%.2f", hz))
+	if hz < 10 { // TA0 returns the QMX to RX
+		r.keyed = false
+	}
+	return nil
+}
+func (r *fakeTXRadio) Transmitting(context.Context) (bool, error) {
+	if r.tqErrs > 0 {
+		r.tqErrs--
+		return false, errors.New("timeout")
+	}
+	return r.keyed, nil
 }
 func (r *fakeTXRadio) SetMode(m int) error {
 	r.log = append(r.log, fmt.Sprintf("MD%d", m))
@@ -661,5 +688,49 @@ func TestTXIgnoresSWRAtZeroPower(t *testing.T) {
 	h.tx.onMeter(meterReading{ok: true, watts: 3, swr: 4.5})
 	if h.tx.state != txInhibit {
 		t.Fatalf("real high SWR did not abort: state %v", h.tx.state)
+	}
+}
+
+// A USB serial hiccup lost the stop commands at key-up (seen in another QMX project): the
+// daemon must keep re-sending TA0/RX until TQ confirms receive, and only then tell the engine
+// that TX has ended (so its retuning does not feed the QMX's CAT watchdog meanwhile).
+func TestTXStopResentUntilConfirmed(t *testing.T) {
+	h := newHarness(t)
+	h.send(true, 21074000, 1500, 0.5, 300*time.Millisecond)
+	if !h.radio.keyed {
+		t.Fatal("not keyed")
+	}
+	h.radio.lostStops, h.radio.tqErrs = 4, 2 // TA0+RX lost twice, and the link times out twice
+	h.send(false, 21074000, 0, 0, 20*time.Millisecond)
+	if !h.radio.keyed {
+		t.Fatal("test setup: the stop should have been lost")
+	}
+	if n := len(h.active); n != 1 || !h.active[0] {
+		t.Fatalf("engine told TX ended before the stop was confirmed: %v", h.active)
+	}
+	// New MOX while the stop is unconfirmed must not key again.
+	h.send(true, 21074000, 1500, 0.5, 100*time.Millisecond)
+	if h.radio.count("TX") != 1 {
+		t.Fatalf("re-keyed while the stop was unconfirmed: %v", h.radio.log)
+	}
+	h.idle(2 * time.Second)
+	if h.radio.keyed {
+		t.Fatalf("QMX still keyed after 2 s of retries: %v", h.radio.log)
+	}
+	if n := len(h.active); n != 2 || h.active[1] {
+		t.Fatalf("engine not told TX ended after confirmation: %v", h.active)
+	}
+}
+
+// Normally the stop is confirmed on the first tick, with no re-send.
+func TestTXStopConfirmedAtOnce(t *testing.T) {
+	h := newHarness(t)
+	h.send(true, 21074000, 1500, 0.5, 300*time.Millisecond)
+	h.send(false, 21074000, 0, 0, 20*time.Millisecond)
+	if h.radio.keyed || len(h.active) != 2 || h.active[1] {
+		t.Fatalf("keyed %v, active %v", h.radio.keyed, h.active)
+	}
+	if h.radio.count("RX") != 1 {
+		t.Fatalf("stop re-sent needlessly: %v", h.radio.log)
 	}
 }

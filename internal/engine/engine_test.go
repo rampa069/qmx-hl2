@@ -27,7 +27,7 @@ type fakeCAT struct {
 }
 
 func newFakeCAT() *fakeCAT {
-	return &fakeCAT{state: map[string]string{"FA": "FA00024915000;", "MD": "MD3;", "Q9": "Q90;"}}
+	return &fakeCAT{state: map[string]string{"FA": "FA00024915000;", "MD": "MD3;", "Q9": "Q90;", "TQ": "TQ0;"}}
 }
 
 func (f *fakeCAT) Write(p []byte) (int, error) {
@@ -39,6 +39,16 @@ func (f *fakeCAT) Write(p []byte) (int, error) {
 		}
 		f.log = append(f.log, cmd)
 		key := cmd[:2]
+		switch cmd { // TX state, as the QMX reports it with TQ
+		case "TX;":
+			f.state["TQ"] = "TQ1;"
+			continue
+		case "RX;":
+			f.state["TQ"] = "TQ0;"
+			continue
+		case "TA0;": // also returns the QMX to RX
+			f.state["TQ"] = "TQ0;"
+		}
 		if cmd == key+";" {
 			f.pending += f.state[key]
 		} else {
