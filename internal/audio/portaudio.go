@@ -18,7 +18,10 @@ type PABackend struct{}
 // NewPABackend returns a PortAudio backend. Call Init before use.
 func NewPABackend() *PABackend { return &PABackend{} }
 
-func (pa *PABackend) Init() error { return portaudio.Initialize() }
+func (pa *PABackend) Init() error {
+	quietALSA()
+	return portaudio.Initialize()
+}
 
 func (pa *PABackend) Terminate() { _ = portaudio.Terminate() }
 
