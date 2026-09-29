@@ -167,7 +167,7 @@ settings it found.
   - when the QMX's own SWR protection has locked transmit (CAT `SR`, firmware 1_04_004 or
     later). The log says so and how to clear it. That protection samples every millisecond,
     and on firmware 1_04_010 to 1_04_015 the key-down transient alone tripped it on a good
-    antenna with its threshold at 3 and 5, but not at 7 or 9 (QMX+). If your antenna is fine
+    antenna with its threshold at 3 and 5, but not at 6, 7 or 9 (QMX+). If your antenna is fine
     and it keeps tripping, raise its threshold to about 7.
 
   After any of these, TX stays off until the client releases MOX. A tone over that reads 0 W
