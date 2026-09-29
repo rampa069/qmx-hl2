@@ -26,6 +26,9 @@ type TXRadio interface {
 	SetMode(m int) error
 	SWR(ctx context.Context) (float64, error)
 	PowerOut(ctx context.Context) (float64, error)
+	// SWRProtection reports whether the QMX's own SWR protection has locked transmit (CAT SR,
+	// firmware 1_04_004 or later).
+	SWRProtection(ctx context.Context) (bool, error)
 }
 
 // TXConfig controls the transmit path. The QMX transmits a single tone whose frequency is set
@@ -106,16 +109,17 @@ type transmitter struct {
 	// meter, if set, receives the QMX's measured power (W) and SWR during TX.
 	meter func(watts, swr float64)
 
-	state     txState
-	tr        *dsp.ToneTracker
-	lastMox   time.Time
-	onSince   time.Time
-	dial      uint32
-	toneOn    bool
-	lastTone  float64
-	lastSent  time.Time
-	highSWR   int
-	armedFreq uint32
+	state      txState
+	tr         *dsp.ToneTracker
+	lastMox    time.Time
+	onSince    time.Time
+	dial       uint32
+	toneOn     bool
+	lastTone   float64
+	lastSent   time.Time
+	highSWR    int
+	zeroWarned bool // the 0 W warning was given this over
+	armedFreq  uint32
 
 	lastPower, lastSWRVal float64
 	// per-transmission statistics, logged at key-up
@@ -199,10 +203,12 @@ func (t *transmitter) run(ctx context.Context) {
 type meterReading struct {
 	watts, swr float64
 	ok         bool
+	protected  bool // the QMX reports SR1: its SWR protection has locked transmit
 }
 
 // meterLoop polls power and SWR every 300 ms while the QMX is keyed.
 func (t *transmitter) meterLoop(ctx context.Context, out chan<- meterReading) {
+	srSupported := true
 	tick := time.NewTicker(300 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -216,8 +222,19 @@ func (t *transmitter) meterLoop(ctx context.Context, out chan<- meterReading) {
 		}
 		swr, err1 := t.radio.SWR(ctx)
 		watts, err2 := t.radio.PowerOut(ctx)
+		r := meterReading{watts: watts, swr: swr, ok: err1 == nil && err2 == nil}
+		// Firmware before 1_04_004 has no SR: stop asking after the first failure, since each
+		// unanswered query costs the CAT timeout.
+		if srSupported {
+			locked, err := t.radio.SWRProtection(ctx)
+			if err != nil {
+				srSupported = false
+				slog.Info("QMX firmware has no CAT SR; its SWR protection is not monitored", "err", err)
+			}
+			r.protected = locked
+		}
 		select {
-		case out <- meterReading{watts: watts, swr: swr, ok: err1 == nil && err2 == nil}:
+		case out <- r:
 		default:
 		}
 	}
@@ -240,7 +257,25 @@ func (t *transmitter) onMeter(r meterReading) {
 		t.meter(watts, swr)
 	}
 	slog.Debug("TX meter", "power_w", watts, "swr", swr, "tone", t.lastTone)
-	if !r.ok || swr == 0 || !t.toneOn || t.now().Sub(t.onSince) < t.cfg.SWRGrace {
+	if r.protected {
+		// The QMX samples SWR every 1 ms and locks transmit above its threshold. On firmware
+		// 1_04_010 to 1_04_015 its key-down transient alone tripped it on a good antenna, with
+		// the threshold at 3 and also at 5 (2026-09-29).
+		slog.Error("the QMX's own SWR protection has locked transmit (CAT SR1): clear it on the radio " +
+			"(enter and leave the menu). On firmware 1_04_010-1_04_015 its key-down transient can trip it even with a good " +
+			"antenna (seen with thresholds 3 and 5); if the antenna is fine, disabling the QMX's SWR protection avoids it")
+		t.abort("QMX SWR protection")
+		return
+	}
+	// A tone over at 0 W past the key-down transient: the QMX is not transmitting (older
+	// firmware without SR, or another lock-out). Warn once per over.
+	if r.ok && t.toneOn && !t.voice && r.watts == 0 && t.now().Sub(t.onSince) >= t.cfg.SWRGrace+time.Second && !t.zeroWarned {
+		t.zeroWarned = true
+		slog.Warn("the QMX reports 0 W while keyed: check its display for a lock-out (S, P, B)")
+	}
+	// With no RF (r.watts == 0) the QMX still reports an SWR computed from noise in its
+	// forward and reverse readings (seen on groups.io, 2026-09): it means nothing.
+	if !r.ok || swr == 0 || r.watts == 0 || !t.toneOn || t.now().Sub(t.onSince) < t.cfg.SWRGrace {
 		return
 	}
 	if swr > t.cfg.SWRMax {
@@ -409,7 +444,7 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 	t.keyed.Store(true)
 	t.statKeyDowns, t.statTones, t.statRawWatts = 0, 0, 0
 	t.onSince = now
-	t.highSWR = 0
+	t.highSWR, t.zeroWarned = 0, false
 	t.toneOn = false
 	if t.active != nil {
 		t.active(true)
@@ -455,7 +490,7 @@ func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time, usb bool) {
 	t.keyed.Store(true)
 	t.statKeyDowns, t.statTones, t.statRawWatts = 1, 0, 0
 	t.onSince = now
-	t.highSWR = 0
+	t.highSWR, t.zeroWarned = 0, false
 	if t.active != nil {
 		t.active(true)
 	}

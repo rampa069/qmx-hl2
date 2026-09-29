@@ -6,11 +6,13 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 type fakeTXRadio struct {
 	log []string
 	swr float64
+	sr  bool // SWR protection locked (CAT SR1)
 }
 
 func (r *fakeTXRadio) SetFreqA(hz uint32) error {
@@ -36,8 +39,9 @@ func (r *fakeTXRadio) SetMode(m int) error {
 	r.log = append(r.log, fmt.Sprintf("MD%d", m))
 	return nil
 }
-func (r *fakeTXRadio) SWR(context.Context) (float64, error)      { return r.swr, nil }
-func (r *fakeTXRadio) PowerOut(context.Context) (float64, error) { return 3.8, nil }
+func (r *fakeTXRadio) SWR(context.Context) (float64, error)        { return r.swr, nil }
+func (r *fakeTXRadio) PowerOut(context.Context) (float64, error)   { return 3.8, nil }
+func (r *fakeTXRadio) SWRProtection(context.Context) (bool, error) { return r.sr, nil }
 
 func (r *fakeTXRadio) count(prefix string) int {
 	n := 0
@@ -579,5 +583,83 @@ func TestTXSSTVLeaderGoesSSB(t *testing.T) {
 	h.send(true, 14230000, 1900, 0.5, 300*time.Millisecond)
 	if !h.tx.voice || h.radio.count("TA") != 0 {
 		t.Errorf("voice=%v, TA commands %d; want SSB", h.tx.voice, h.radio.count("TA"))
+	}
+}
+
+// The QMX's own SWR protection (SR1) locked transmit on 2026-09-29 while the daemon kept
+// "transmitting" at 0 W with no SWR reading. The over must now stop at once, until MOX drops.
+func TestTXStopsOnQMXSWRProtection(t *testing.T) {
+	h := newHarness(t)
+	h.send(true, 21074000, 1500, 0.5, 300*time.Millisecond)
+	if h.tx.state != txOn {
+		t.Fatalf("not keyed: state %v", h.tx.state)
+	}
+	h.tx.onMeter(meterReading{ok: true, protected: true})
+	if h.tx.state != txInhibit {
+		t.Fatalf("state %v after SR1, want inhibit", h.tx.state)
+	}
+	if h.radio.log[len(h.radio.log)-1] != "RX" {
+		t.Errorf("radio not returned to RX: %v", h.radio.log)
+	}
+	// It stays off while MOX is held, and re-arms after MOX drops.
+	h.send(true, 21074000, 1500, 0.5, 300*time.Millisecond)
+	if h.tx.state != txInhibit {
+		t.Fatalf("re-keyed while MOX held: state %v", h.tx.state)
+	}
+	h.send(false, 21074000, 0, 0, 50*time.Millisecond)
+	if h.tx.state != txIdle {
+		t.Fatalf("state %v after MOX drop, want idle", h.tx.state)
+	}
+}
+
+// noSRRadio is a QMX with firmware before 1_04_004: SR is never answered.
+type noSRRadio struct {
+	fakeTXRadio
+	srCalls atomic.Int32
+}
+
+func (r *noSRRadio) SWRProtection(context.Context) (bool, error) {
+	r.srCalls.Add(1)
+	return false, errors.New("timeout")
+}
+
+// Without CAT SR the meter loop stops asking after the first failure: each unanswered query
+// would cost the CAT timeout on every meter tick.
+func TestMeterLoopStopsAskingSRWithoutSupport(t *testing.T) {
+	r := &noSRRadio{}
+	tx := newTransmitter(DefaultTXConfig(), r, nil)
+	tx.keyed.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan meterReading, 16)
+	done := make(chan struct{})
+	go func() { tx.meterLoop(ctx, out); close(done) }()
+	for i := 0; i < 3; i++ {
+		select {
+		case <-out:
+		case <-time.After(2 * time.Second):
+			t.Fatal("no meter reading")
+		}
+	}
+	cancel()
+	<-done
+	if n := r.srCalls.Load(); n != 1 {
+		t.Fatalf("SR asked %d times, want 1", n)
+	}
+}
+
+// With no RF the QMX still reports an SWR computed from noise; it must not abort the over.
+func TestTXIgnoresSWRAtZeroPower(t *testing.T) {
+	h := newHarness(t)
+	h.send(true, 21074000, 1500, 0.5, time.Second) // past the key-down grace
+	for i := 0; i < 5; i++ {
+		h.tx.onMeter(meterReading{ok: true, watts: 0, swr: 4.5})
+	}
+	if h.tx.state != txOn {
+		t.Fatalf("aborted on an SWR reading at 0 W: state %v", h.tx.state)
+	}
+	h.tx.onMeter(meterReading{ok: true, watts: 3, swr: 4.5})
+	h.tx.onMeter(meterReading{ok: true, watts: 3, swr: 4.5})
+	if h.tx.state != txInhibit {
+		t.Fatalf("real high SWR did not abort: state %v", h.tx.state)
 	}
 }

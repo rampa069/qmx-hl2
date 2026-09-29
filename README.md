@@ -163,9 +163,15 @@ settings it found.
   - when the client stops sending transmit packets for 150 ms;
   - after `-maxtx`;
   - when the SWR stays above 3:1 (after a short grace period for the key-down transient);
-  - when a tone falls outside what the QMX accepts.
+  - when a tone falls outside what the QMX accepts;
+  - when the QMX's own SWR protection has locked transmit (CAT `SR`, firmware 1_04_004 or
+    later). The log says so and how to clear it. That protection samples every millisecond,
+    and on firmware 1_04_010 to 1_04_015 the key-down transient alone tripped it on a good
+    antenna, with its threshold at 3 and also at 5. If your antenna is fine and it keeps
+    tripping, disabling it avoids that (the daemon still stops on a high SWR).
 
-  After any of these, TX stays off until the client releases MOX.
+  After any of these, TX stays off until the client releases MOX. A tone over that reads 0 W
+  also logs a warning, since the QMX may have locked transmit for another reason.
 
 ## Limitations and notes
 

@@ -283,6 +283,13 @@ func (c *Client) SWR(ctx context.Context) (float64, error) {
 	return float64(v) / 100, nil
 }
 
+// SWRProtection reports whether the QMX's SWR protection has locked transmit (CAT SR, firmware
+// 1_04_004 or later): SR1 means locked. Older firmware does not answer, so this times out.
+func (c *Client) SWRProtection(ctx context.Context) (bool, error) {
+	v, err := c.QueryInt(ctx, "SR;")
+	return v == 1, err
+}
+
 // Transmitting reports the TX state (TQ).
 func (c *Client) Transmitting(ctx context.Context) (bool, error) {
 	v, err := c.QueryInt(ctx, "TQ;")
