@@ -436,8 +436,9 @@ func (e *Engine) catLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-check.C:
+			// While transmitting (also from its own paddles) the QMX does not report IQ mode.
 			e.mu.Lock()
-			busy := e.txActive
+			busy := e.txActive || e.paddleTX
 			e.mu.Unlock()
 			if busy {
 				continue
