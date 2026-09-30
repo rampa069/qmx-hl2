@@ -31,6 +31,8 @@ type TXRadio interface {
 	SWRProtection(ctx context.Context) (bool, error)
 	// Transmitting reports the QMX's TX state (CAT TQ).
 	Transmitting(ctx context.Context) (bool, error)
+	// SetSplit turns split (TX on VFO B) on or off.
+	SetSplit(on bool) error
 }
 
 // TXConfig controls the transmit path. The QMX transmits a single tone whose frequency is set
@@ -111,6 +113,10 @@ type transmitter struct {
 	active func(on bool)
 	// meter, if set, receives the QMX's measured power (W) and SWR during TX.
 	meter func(watts, swr float64)
+	// paddleMode, if set, reports that the QMX is in CW mode with split for its own paddles;
+	// the daemon's own transmissions then switch it to Digi (or SSB) without split first, and
+	// the engine sets CW up again afterwards.
+	paddleMode func() bool
 
 	state      txState
 	tr         *dsp.ToneTracker
@@ -122,6 +128,7 @@ type transmitter struct {
 	lastSent   time.Time
 	highSWR    int
 	zeroWarned bool // the 0 W warning was given this over
+	zeroCount  int  // consecutive keyed meter readings at 0 W
 	// After key-up the stop is confirmed with CAT TQ and re-sent until the QMX reports RX: a
 	// lost TA0/RX (a USB serial hiccup) would otherwise leave it keyed, and the engine's
 	// retuning would keep feeding the QMX's CAT watchdog (seen in another QMX project,
@@ -295,7 +302,13 @@ func (t *transmitter) onMeter(r meterReading) {
 	}
 	// A tone over at 0 W past the key-down transient: the QMX is not transmitting (older
 	// firmware without SR, or another lock-out). Warn once per over.
-	if r.ok && t.toneOn && !t.voice && r.watts == 0 && t.now().Sub(t.onSince) >= t.cfg.SWRGrace+time.Second && !t.zeroWarned {
+	// A single 0 W reading is normal in CW (it can fall between elements), so it must repeat.
+	if r.ok && t.toneOn && !t.voice && r.watts == 0 && t.now().Sub(t.onSince) >= t.cfg.SWRGrace+time.Second {
+		t.zeroCount++
+	} else if r.watts > 0 {
+		t.zeroCount = 0
+	}
+	if t.zeroCount >= 4 && !t.zeroWarned {
 		t.zeroWarned = true
 		slog.Warn("the QMX reports 0 W while keyed: check its display for a lock-out (S, P, B)")
 	}
@@ -460,7 +473,18 @@ func (t *transmitter) frame(ctx context.Context, f txFrame) {
 	}
 }
 
+// leavePaddleMode puts a QMX set up for its paddles (CW mode, split) into mode m without split,
+// so that the daemon's own transmission goes out on VFO A.
+func (t *transmitter) leavePaddleMode(m int) {
+	if t.paddleMode == nil || !t.paddleMode() {
+		return
+	}
+	_ = t.radio.SetSplit(false)
+	_ = t.radio.SetMode(m)
+}
+
 func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
+	t.leavePaddleMode(qmxModeDigi) // CAT TA works in Digi mode only
 	dial := int64(txFreq) + int64(math.Round(bb-t.cfg.ToneCentre))
 	if dial <= 0 {
 		slog.Warn("TX frequency out of range", "tx_freq", txFreq, "baseband", bb)
@@ -482,7 +506,7 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 	t.keyed.Store(true)
 	t.statKeyDowns, t.statTones, t.statRawWatts = 0, 0, 0
 	t.onSince = now
-	t.highSWR, t.zeroWarned = 0, false
+	t.highSWR, t.zeroWarned, t.zeroCount = 0, false, 0
 	t.toneOn = false
 	if t.active != nil {
 		t.active(true)
@@ -493,6 +517,7 @@ func (t *transmitter) keyDown(txFreq uint32, bb float64, now time.Time) {
 
 // keyDownSSB transmits the client's audio through the QMX's SSB modulator.
 func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time, usb bool) {
+	t.leavePaddleMode(qmxModeDigi)
 	mode, name := qmxModeUSB, "USB"
 	if !usb {
 		mode, name = qmxModeLSB, "LSB"
@@ -528,7 +553,7 @@ func (t *transmitter) keyDownSSB(txFreq uint32, now time.Time, usb bool) {
 	t.keyed.Store(true)
 	t.statKeyDowns, t.statTones, t.statRawWatts = 1, 0, 0
 	t.onSince = now
-	t.highSWR, t.zeroWarned = 0, false
+	t.highSWR, t.zeroWarned, t.zeroCount = 0, false, 0
 	if t.active != nil {
 		t.active(true)
 	}

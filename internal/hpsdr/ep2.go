@@ -77,7 +77,11 @@ type RadioState struct {
 
 	PTTHangMs   int // default 12
 	TXLatencyMs int // default 20
-	CWX         bool
+	// CWX is C&C 0x0f bit 24: on the HL2 it enables CWX, and Thetis (and Zeus) set it only
+	// while in CW with the radio's own keyer, so it also tells that the client is in CW.
+	CWX bool
+	// KeyerSpeed is the HL2 iambic keyer speed in WPM (C&C 0x0b bits 13:8), 0 if not sent.
+	KeyerSpeed int
 
 	MOX bool // from the most recent frame
 }
@@ -122,6 +126,8 @@ func (s *RadioState) Apply(cc CC) bool {
 		} else {
 			s.LNAdB = 20
 		}
+	case cc.Addr == 0x0b:
+		s.KeyerSpeed = int(d>>8) & 0x3F
 	case cc.Addr == 0x0f:
 		s.CWX = d&(1<<24) != 0
 	case cc.Addr == 0x17:

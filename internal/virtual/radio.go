@@ -37,7 +37,10 @@ const (
 	txSWR      = 1.1
 	modeLSB    = 1
 	modeUSB    = 2
+	modeCW     = 3
 	modeDigi   = 6
+	modeCWR    = 7
+	cwOffset   = 700 // Hz, reported by MMCW|CW offset;
 )
 
 // Radio is a virtual QMX. Use CAT, Capture and Playback to plug it into the daemon.
@@ -139,6 +142,10 @@ func (r *Radio) command(cmd string) {
 	now := r.now()
 	r.advance(now)
 	key, val := cmd[:2], strings.TrimSuffix(cmd[2:], ";")
+	if key == "MM" && !strings.Contains(val, "=") { // menu read: only the CW offset is asked
+		r.reply("MM700;")
+		return
+	}
 	if val == "" {
 		r.reply(r.query(key))
 		return
@@ -416,6 +423,12 @@ func (c *capture) Read(dst []float32) (int, error) {
 	now := r.now()
 	r.advance(now)
 	lo := float64(r.fa - ifOffset)
+	switch r.md { // CW modes move the LO by the CW offset, as the real QMX does
+	case modeCW:
+		lo -= cwOffset
+	case modeCWR:
+		lo += cwOffset
+	}
 	for i := 0; i < r.frames; i++ {
 		x := complex(noiseSigma*r.rng.NormFloat64(), noiseSigma*r.rng.NormFloat64())
 		// A replay waits while the client transmits: the daemon mutes receive then.

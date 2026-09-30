@@ -232,6 +232,34 @@ func (c *Client) FreqA(ctx context.Context) (uint32, error) {
 	return uint32(v), err
 }
 
+// SetFreqB sets VFO B in Hz (the TX VFO when split is on).
+func (c *Client) SetFreqB(hz uint32) error { return c.Set(fmt.Sprintf("FB%011d;", hz)) }
+
+// SetSplit turns split on (RX on VFO A, TX on VFO B) or off.
+func (c *Client) SetSplit(on bool) error {
+	if on {
+		return c.Set("SP1;")
+	}
+	return c.Set("SP0;")
+}
+
+// SetKeyerSpeed sets the keyer speed in WPM (session only, not saved to EEPROM).
+func (c *Client) SetKeyerSpeed(wpm int) error { return c.Set(fmt.Sprintf("KS%02d;", wpm)) }
+
+// CWOffset reads the CW offset (sidetone pitch) in Hz from the menu: in CW mode the receive LO
+// sits this much further below the dial (LO = dial - 12000 - offset). Firmware 1_02_006+.
+func (c *Client) CWOffset(ctx context.Context) (int, error) {
+	r, err := c.Query(ctx, "MMCW|CW offset;")
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r, "MM"), ";"))
+	if err != nil || v <= 0 || v > 2000 {
+		return 0, fmt.Errorf("qmx: bad CW offset reply %q", r)
+	}
+	return v, nil
+}
+
 // SetMode sets the operating mode (ModeDigi etc.).
 func (c *Client) SetMode(m int) error { return c.Set(fmt.Sprintf("MD%d;", m)) }
 

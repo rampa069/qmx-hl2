@@ -21,7 +21,7 @@ built-in FT8/FT4/WSPR and SSTV modes as well as external WSJT-X:
 | Discovery as a Hermes-Lite 2 | works |
 | RX spectrum/waterfall at 48/96/192/384 kHz | works (the QMX itself covers 48 kHz) |
 | FT8 / FT4 / WSPR / JS8 transmit | works: complete FT8 QSOs, spots on PSK Reporter |
-| CW transmit | works: client-generated CW keyed through the QMX; CWX (host keying with MOX off) tested with the virtual QMX |
+| CW transmit | works: client-generated CW keyed through the QMX; CWX (host keying with MOX off) tested with the virtual QMX; the QMX's own paddles when the client is in CW (needs a client that signals CW, such as Thetis) |
 | SSB voice transmit | works |
 | SSTV transmit | works: pictures received straight by remote stations |
 | FreeDV RADE V1 transmit | works: first QSO on 28 Sep 2026 with EC7C on 40 m, good reports (Zeus's built-in RADE); the first FreeDV QSO for both stations |
@@ -52,6 +52,11 @@ transmission:
 - **Single tone** (FT8, FT4, WSPR, JS8, CW, TUNE): the daemon tracks the instantaneous frequency
   and sends it to the QMX with the CAT tone command (`TA`). The QMX stays in Digi mode and
   generates a clean, keyed carrier at exactly the right frequency.
+- **CW with the QMX's paddles**: when the client is in CW with the radio's keyer (it sets C&C
+  0x0f bit 24, as Thetis does), the QMX is put in CW mode with split, so its own paddles key
+  it on the client's TX frequency (VFO B), at the client's keyer speed. While the paddles key
+  it, receive is muted and the client sees the HL2's PTT bit. When the client leaves CW, the
+  QMX goes back to Digi.
 - **CWX** (host keying with MOX off, as clients do with the HL2's internal keyer): each key
   edge in the TX I words keys the QMX with the tone command, carrier exactly on the TX
   frequency; the over ends after the same 500 ms hang as the HL2 gateware.

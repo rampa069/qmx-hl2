@@ -55,6 +55,10 @@ func (r *fakeTXRadio) Tone(hz float64) error {
 	}
 	return nil
 }
+func (r *fakeTXRadio) SetSplit(on bool) error {
+	r.log = append(r.log, fmt.Sprintf("SP%d", map[bool]int{false: 0, true: 1}[on]))
+	return nil
+}
 func (r *fakeTXRadio) Transmitting(context.Context) (bool, error) {
 	if r.tqErrs > 0 {
 		r.tqErrs--
@@ -798,5 +802,16 @@ func TestTXCWXNeedsEnableAndKey(t *testing.T) {
 	h.sendCWX(7030000, true, false, true, 200*time.Millisecond)
 	if h.radio.count("TX") != 0 {
 		t.Fatalf("keyed: %v", h.radio.log)
+	}
+}
+
+// With the QMX set up for its paddles (CW mode, split), the daemon's own tone TX first goes to
+// Digi without split, so it transmits on VFO A with CAT TA.
+func TestTXLeavesPaddleModeFirst(t *testing.T) {
+	h := newHarness(t)
+	h.tx.paddleMode = func() bool { return true }
+	h.send(true, 7074000, 1500, 0.5, 300*time.Millisecond)
+	if len(h.radio.log) < 3 || h.radio.log[0] != "SP0" || h.radio.log[1] != "MD6" {
+		t.Fatalf("radio log %v, want SP0 then MD6 before keying", h.radio.log)
 	}
 }

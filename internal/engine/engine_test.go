@@ -27,7 +27,8 @@ type fakeCAT struct {
 }
 
 func newFakeCAT() *fakeCAT {
-	return &fakeCAT{state: map[string]string{"FA": "FA00024915000;", "MD": "MD3;", "Q9": "Q90;", "TQ": "TQ0;"}}
+	return &fakeCAT{state: map[string]string{"FA": "FA00024915000;", "MD": "MD3;", "Q9": "Q90;", "TQ": "TQ0;",
+		"SP": "SP0;", "FB": "FB00007030000;", "KS": "KS18;"}}
 }
 
 func (f *fakeCAT) Write(p []byte) (int, error) {
@@ -39,6 +40,10 @@ func (f *fakeCAT) Write(p []byte) (int, error) {
 		}
 		f.log = append(f.log, cmd)
 		key := cmd[:2]
+		if key == "MM" && !strings.Contains(cmd, "=") { // menu read: only the CW offset is asked
+			f.pending += "MM700;"
+			continue
+		}
 		switch cmd { // TX state, as the QMX reports it with TQ
 		case "TX;":
 			f.state["TQ"] = "TQ1;"
@@ -580,5 +585,82 @@ func TestEngineTuneHysteresis(t *testing.T) {
 	stop()
 	if dials[1] != "FA00014091000;" {
 		t.Errorf("48 kHz: RX1 +5 kHz: dial %s, want a retune to 14.091 MHz", dials[1])
+	}
+}
+
+// ptt reports whether any EP6 packet carries the PTT bit (C0[0] of either frame).
+func ptt(pkts [][]byte) bool {
+	for _, p := range pkts {
+		if (p[8+3]|p[8+512+3])&0x01 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// CW with the QMX's own paddles: the client's CW bit (0x0f bit 24) puts the QMX in CW mode with
+// split (RX dial moved by the CW offset, VFO B on the TX frequency, keyer speed from 0x0b);
+// paddle TX (TQ1) mutes RX and raises the EP6 PTT bit; clearing the bit goes back to Digi.
+func TestEnginePaddleMode(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["QB"], cat.state["QC"] = "QB1;", "QC120;"
+	cat.state["SW"], cat.state["PC"] = "SW120;", "PC38;"
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	out := &capSender{}
+	e := New(cfg, client, &fakeCapture{frames: 240, toneHz: 3000}, out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{7030000, 0x04})) // RX1; 48 kHz, 1 RX
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	waitFor(t, func() bool { return cat.get("FA") == "FA00007042000;" }, "Digi RX tune")
+
+	// Client enters CW: TX 7.0306 MHz, keyer 22 WPM, CW bit on.
+	e.EP2(ep2([2]byte{0x01 << 1, 0x0b << 1}, [2]uint32{7030600, 22 << 8}))
+	e.EP2(ep2([2]byte{0x0f << 1, 0x00}, [2]uint32{1 << 24, 0x04}))
+	waitFor(t, func() bool { return cat.get("FA") == "FA00007042700;" }, "CW RX tune (+700 Hz)")
+	for k, want := range map[string]string{"MD": "MD3;", "SP": "SP1;", "FB": "FB00007030600;", "KS": "KS22;"} {
+		if got := cat.get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+
+	// The operator keys the QMX's paddles.
+	cat.mu.Lock()
+	cat.state["TQ"] = "TQ1;"
+	cat.mu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	out.take()
+	time.Sleep(200 * time.Millisecond)
+	keyed := out.take()
+	if !ptt(keyed) {
+		t.Error("EP6 PTT bit not set while the paddles key the QMX")
+	}
+	if a := toneAt(decode(keyed, 1, 0), -3000, 48000); a > 0.01 {
+		t.Errorf("RX not muted during paddle TX: tone %g", a)
+	}
+	cat.mu.Lock()
+	cat.state["TQ"] = "TQ0;"
+	cat.mu.Unlock()
+	time.Sleep(400 * time.Millisecond)
+	out.take()
+	time.Sleep(200 * time.Millisecond)
+	if ptt(out.take()) {
+		t.Error("EP6 PTT bit still set after the paddles were released")
+	}
+
+	// Client leaves CW.
+	e.EP2(ep2([2]byte{0x0f << 1, 0x00}, [2]uint32{0, 0x04}))
+	waitFor(t, func() bool { return cat.get("FA") == "FA00007042000;" }, "Digi RX tune again")
+	if cat.get("MD") != "MD6;" || cat.get("SP") != "SP0;" {
+		t.Errorf("not back in Digi without split: %s %s", cat.get("MD"), cat.get("SP"))
 	}
 }

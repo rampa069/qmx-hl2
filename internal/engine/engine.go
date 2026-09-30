@@ -106,6 +106,15 @@ type Engine struct {
 	presaved map[string]string // original QMX state from an earlier connection
 	orig     map[string]string // original QMX state, as restored on exit
 
+	// CW with the QMX's own paddles: while the client signals CW with the radio's keyer
+	// (C&C 0x0f bit 24, see hpsdr.RadioState.CWX), the QMX is kept in CW mode with split, so
+	// its paddles key it on the client's TX frequency (VFO B).
+	cwOffset   int    // Hz: in CW mode the LO sits this much further below the dial
+	paddleMode bool   // the QMX is set up for its paddles (CW mode, split)
+	paddleTX   bool   // the QMX is transmitting from its paddles
+	lastFB     uint32 // VFO B last sent
+	lastKS     int    // keyer speed last sent
+
 	ep2Count, ep6Count atomic.Int64 // packet counters for the rate log
 	capFrames          atomic.Int64 // QMX frames captured
 
@@ -126,6 +135,11 @@ func New(cfg Config, cat *qmx.Client, capt audio.CaptureStream, out Sender) *Eng
 	}
 	if cfg.TX.Enabled {
 		e.tx = newTransmitter(cfg.TX, cat, e.setTXActive)
+		e.tx.paddleMode = func() bool {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			return e.paddleMode
+		}
 		e.tx.meter = func(w, swr float64) {
 			e.mu.Lock()
 			e.txWatts, e.txSWR = w, swr
@@ -203,12 +217,14 @@ func (e *Engine) EP2(pkt []byte) {
 	e.mu.Lock()
 	for _, f := range frames {
 		oldRate, oldN, oldRX1 := e.state.SampleRate, e.state.Receivers, e.state.RX1Freq()
+		oldCWX, oldTX, oldKS := e.state.CWX, e.state.TXFreq, e.state.KeyerSpeed
 		if e.state.Apply(f.CC) {
 			if e.state.SampleRate != oldRate || e.state.Receivers != oldN {
 				e.gen++
 				slog.Info("stream shape", "rate", e.state.SampleRate, "receivers", e.state.Receivers)
 			}
-			if e.state.RX1Freq() != oldRX1 {
+			if e.state.RX1Freq() != oldRX1 || e.state.CWX != oldCWX ||
+				e.state.CWX && (e.state.TXFreq != oldTX || e.state.KeyerSpeed != oldKS) {
 				retune = true
 			}
 			slog.Debug("host register", "addr", fmt.Sprintf("0x%02x", f.CC.Addr), "data", fmt.Sprintf("0x%08x", f.CC.Data),
@@ -252,6 +268,10 @@ func (e *Engine) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); e.catLoop(ctx) }()
+	if e.tx != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); e.paddleLoop(ctx) }()
+	}
 	if e.tx != nil {
 		// The transmitter keys up on shutdown before restore runs.
 		wg.Add(1)
@@ -336,6 +356,24 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 				return nil, err
 			}
 		}
+		// Split, VFO B and keyer speed change while the QMX is keyed by its paddles (see
+		// paddleMode). Their original values are restored on exit when they can be read; the
+		// manual shows FB; answering with an FA prefix, so a failed read is not fatal.
+		for _, c := range []string{"SP", "FB", "KS"} {
+			r, err := e.readOrig(ctx, c)
+			if err != nil {
+				slog.Debug("QMX setting not saved", "cmd", c, "err", err)
+				continue
+			}
+			orig[c] = r
+			keys = append(keys, c)
+		}
+		e.cwOffset = 700
+		if off, err := e.cat.CWOffset(ctx); err == nil {
+			e.cwOffset = off
+		} else {
+			slog.Debug("QMX CW offset not read; assuming 700 Hz", "err", err)
+		}
 		// If the daemon dies mid-transmission, the QMX drops TX after 3 s without CAT.
 		if err := e.cat.SetCATTimeout(true, 3); err != nil {
 			return nil, err
@@ -412,7 +450,10 @@ func (e *Engine) catLoop(ctx context.Context) {
 			rx1 := e.state.RX1Freq()
 			rate := e.state.SampleRate
 			lo := e.lo
-			busy := e.txActive
+			busy := e.txActive || e.paddleTX
+			wantCW := e.state.CWX && e.tx != nil
+			txFreq, ks := e.state.TXFreq, e.state.KeyerSpeed
+			paddleMode := e.paddleMode
 			verify := false
 			if e.forceTune && !busy {
 				dial = 0
@@ -423,6 +464,17 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if rx1 == 0 || busy {
 				continue // after TX, setTXActive(false) requests a retune
 			}
+			// Our own TX leaves the QMX in Digi (or SSB) without split, so a CW setup is
+			// applied again after it (verify), as well as on each change of the client's mode.
+			if wantCW != paddleMode || verify && wantCW {
+				e.setPaddleMode(wantCW)
+				dial = 0
+			}
+			ifOffset := e.cfg.IFOffset
+			if wantCW {
+				ifOffset += e.cwOffset
+				e.updatePaddleVFO(txFreq, ks)
+			}
 			centre := uint32(int64(rx1) + int64(e.cfg.LOOffset))
 			// Hysteresis: while RX1 stays inside the window, keep the QMX where it is and let
 			// the receiver NCOs follow digitally, instead of retuning (a CAT round trip and a
@@ -430,7 +482,7 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if w := e.tuneWindow(rate); w > 0 && lo != 0 && math.Abs(float64(centre)-lo) <= float64(w) {
 				centre = uint32(lo)
 			}
-			want := centre + uint32(e.cfg.IFOffset)
+			want := centre + uint32(ifOffset)
 			if want == dial {
 				continue
 			}
@@ -446,7 +498,11 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if verify {
 				// After TX the transmitter changed the dial (and for SSB the mode); make sure
 				// the QMX really is back in Digi mode on the RX dial.
-				e.verifyRX(ctx, want)
+				mode := qmx.ModeDigi
+				if wantCW {
+					mode = qmx.ModeCW
+				}
+				e.verifyRX(ctx, want, mode)
 			}
 			// Coalesce bursts of tuning (a client dragging the VFO) to about 20 retunes/s.
 			time.Sleep(50 * time.Millisecond)
@@ -455,7 +511,86 @@ func (e *Engine) catLoop(ctx context.Context) {
 }
 
 // verifyRX reads back the QMX mode and dial after a transmission and corrects them.
-func (e *Engine) verifyRX(ctx context.Context, want uint32) {
+// setPaddleMode sets the QMX up for its own paddles (CW mode, split: RX on VFO A, TX on VFO B)
+// or back to Digi without split.
+func (e *Engine) setPaddleMode(on bool) {
+	if on {
+		_ = e.cat.SetMode(qmx.ModeCW)
+		_ = e.cat.SetSplit(true)
+		slog.Info("client in CW with the radio's keyer: QMX in CW mode, keyed by its paddles", "cw_offset", e.cwOffset)
+	} else {
+		_ = e.cat.SetMode(qmx.ModeDigi)
+		_ = e.cat.SetSplit(false)
+		slog.Info("client left CW: QMX back in Digi mode")
+	}
+	e.mu.Lock()
+	e.paddleMode = on
+	e.lastFB, e.lastKS = 0, 0
+	e.mu.Unlock()
+}
+
+// updatePaddleVFO keeps VFO B on the client's TX frequency (where the paddles transmit) and
+// the QMX keyer on the client's keyer speed.
+func (e *Engine) updatePaddleVFO(txFreq uint32, ks int) {
+	e.mu.Lock()
+	fb, lks := e.lastFB, e.lastKS
+	e.mu.Unlock()
+	if txFreq != 0 && txFreq != fb {
+		if err := e.cat.SetFreqB(txFreq); err == nil {
+			fb = txFreq
+		}
+	}
+	if ks > 0 && ks != lks {
+		if err := e.cat.SetKeyerSpeed(ks); err == nil {
+			lks = ks
+		}
+	}
+	e.mu.Lock()
+	e.lastFB, e.lastKS = fb, lks
+	e.mu.Unlock()
+}
+
+// paddleLoop watches the QMX's TX state while it is keyed by its own paddles: the receive IQ is
+// muted meanwhile, and the client is told through the EP6 PTT bit, as the HL2 does for its key.
+func (e *Engine) paddleLoop(ctx context.Context) {
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		e.mu.Lock()
+		active := e.paddleMode && !e.txActive
+		was := e.paddleTX
+		e.mu.Unlock()
+		keyed := false
+		if active {
+			tx, err := e.cat.Transmitting(ctx)
+			if err != nil {
+				continue
+			}
+			keyed = tx
+		}
+		if keyed == was {
+			continue
+		}
+		e.mu.Lock()
+		e.paddleTX = keyed
+		if !keyed {
+			e.txEndedAt = time.Now()
+		}
+		e.mu.Unlock()
+		if keyed {
+			slog.Info("QMX keyed by its paddles")
+		} else {
+			slog.Info("QMX paddles released")
+		}
+	}
+}
+
+func (e *Engine) verifyRX(ctx context.Context, want uint32, mode int) {
 	time.Sleep(100 * time.Millisecond)
 	md, err1 := e.cat.Mode(ctx)
 	fa, err2 := e.cat.FreqA(ctx)
@@ -463,12 +598,12 @@ func (e *Engine) verifyRX(ctx context.Context, want uint32) {
 		slog.Warn("RX verify: CAT read failed", "mode_err", err1, "freq_err", err2)
 		return
 	}
-	if md == qmx.ModeDigi && fa == want {
+	if md == mode && fa == want {
 		slog.Debug("RX verify ok", "mode", md, "dial", fa)
 		return
 	}
 	slog.Warn("QMX not back on the RX setting after TX; correcting", "mode", md, "dial", fa, "want_dial", want)
-	_ = e.cat.SetMode(qmx.ModeDigi)
+	_ = e.cat.SetMode(mode)
 	time.Sleep(50 * time.Millisecond)
 	_ = e.cat.SetFreqA(want)
 }
@@ -585,8 +720,9 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		acks := e.acks
 		e.acks = nil
 		now := time.Now()
-		mute := now.Before(e.muteUntil) || e.txActive || now.Sub(e.txEndedAt) < 100*time.Millisecond
-		transmitting := e.txActive
+		mute := now.Before(e.muteUntil) || e.txActive || e.paddleTX || now.Sub(e.txEndedAt) < 100*time.Millisecond
+		transmitting := e.txActive || e.paddleTX
+		paddleTX := e.paddleTX
 		watts, swr := e.txWatts, e.txSWR
 		client = e.client
 		e.mu.Unlock()
@@ -655,7 +791,7 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 				}
 			}
 			builder.SetTelemetry(hpsdr.Telemetry{Overload: overload, Temp: hpsdr.TempRaw(30), TXFIFO: 16,
-				FwdPower: hpsdr.PowerRaw(watts), RevPower: hpsdr.ReversePowerRaw(watts, swr)})
+				FwdPower: hpsdr.PowerRaw(watts), RevPower: hpsdr.ReversePowerRaw(watts, swr), PTT: paddleTX})
 			continue
 		}
 		wasTX = false
