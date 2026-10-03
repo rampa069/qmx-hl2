@@ -356,10 +356,11 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 				return nil, err
 			}
 		}
-		// Split, VFO B and keyer speed change while the QMX is keyed by its paddles (see
-		// paddleMode). Their original values are restored on exit when they can be read; the
-		// manual shows FB; answering with an FA prefix, so a failed read is not fatal.
-		for _, c := range []string{"SP", "FB", "KS"} {
+		// VFO B and keyer speed change while the QMX is keyed by its paddles (see paddleMode).
+		// Their original values are restored on exit when they can be read; the manual shows
+		// FB; answering with an FA prefix, so a failed read is not fatal. FB is restored before
+		// split (below): the QMX ignores FB after SP0.
+		for _, c := range []string{"FB", "KS"} {
 			r, err := e.readOrig(ctx, c)
 			if err != nil {
 				slog.Debug("QMX setting not saved", "cmd", c, "err", err)
@@ -385,12 +386,26 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 			slog.Warn("TX ENABLED: the QMX will transmit when the client keys MOX")
 		}
 	}
-	// FA tunes VFO A only: a QMX left receiving on VFO B would not follow the client.
-	if r, err := e.readOrig(ctx, "FR"); err == nil {
-		orig["FR"] = r
-		keys = append(keys, "FR") // last, so that FA and FB are restored before it
-	} else {
-		slog.Debug("QMX setting not saved", "cmd", "FR", "err", err)
+	// FA tunes VFO A only: a QMX left receiving on VFO B would not follow the client, and one
+	// left in split would transmit on VFO B. The VFO selection is restored after FA and FB,
+	// receive VFO first, then transmit VFO and split.
+	vfoKeys := []string{"FR"}
+	if e.tx != nil {
+		vfoKeys = append(vfoKeys, "FT", "SP")
+	}
+	for _, c := range vfoKeys {
+		r, err := e.readOrig(ctx, c)
+		if err != nil {
+			slog.Debug("QMX setting not saved", "cmd", c, "err", err)
+			continue
+		}
+		orig[c] = r
+		keys = append(keys, c)
+	}
+	if e.tx != nil {
+		if err := e.cat.SetSplit(false); err != nil {
+			return nil, err
+		}
 	}
 	if err := e.ensureVFOA(ctx); err != nil {
 		return nil, err

@@ -235,12 +235,19 @@ func (c *Client) FreqA(ctx context.Context) (uint32, error) {
 // SetFreqB sets VFO B in Hz (the TX VFO when split is on).
 func (c *Client) SetFreqB(hz uint32) error { return c.Set(fmt.Sprintf("FB%011d;", hz)) }
 
-// SetSplit turns split on (RX on VFO A, TX on VFO B) or off.
+// SetSplit turns split on (RX on VFO A, TX on VFO B) or off. SP0; alone leaves the QMX's own
+// VFO mode on split (the LCD keeps showing A/B), so leaving split also selects VFO A for both
+// receive and transmit (FR0; FT0;).
 func (c *Client) SetSplit(on bool) error {
 	if on {
 		return c.Set("SP1;")
 	}
-	return c.Set("SP0;")
+	for _, cmd := range []string{"SP0;", "FR0;", "FT0;"} {
+		if err := c.Set(cmd); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RXVFO reports which VFO the QMX receives on: 0 for VFO A, 1 for VFO B (some firmware also

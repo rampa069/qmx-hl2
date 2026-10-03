@@ -28,7 +28,7 @@ type fakeCAT struct {
 
 func newFakeCAT() *fakeCAT {
 	return &fakeCAT{state: map[string]string{"FA": "FA00024915000;", "MD": "MD3;", "Q9": "Q90;", "TQ": "TQ0;",
-		"SP": "SP0;", "FB": "FB00007030000;", "KS": "KS18;", "FR": "FR0;"}}
+		"SP": "SP0;", "FB": "FB00007030000;", "KS": "KS18;", "FR": "FR0;", "FT": "FT0;"}}
 }
 
 func (f *fakeCAT) Write(p []byte) (int, error) {
@@ -272,6 +272,59 @@ func TestEngineSwitchesToVFOA(t *testing.T) {
 	}
 	if got := cat.get("FR"); got != "FR1;" {
 		t.Errorf("FR = %q after exit, want FR1; restored", got)
+	}
+}
+
+// With TX enabled, a QMX left in the operator's own split is taken out of it for the session
+// (the daemon transmits on VFO A) and put back on exit, VFO B first: the QMX ignores FB after
+// SP0.
+func TestEngineLeavesAndRestoresSplit(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["SP"], cat.state["FT"] = "SP1;", "FT1;"
+	cat.state["QB"], cat.state["QC"] = "QB1;", "QC120;"
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, &fakeCapture{frames: 240}, &capSender{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+
+	waitFor(t, func() bool { return e.SavedState() != nil }, "setup")
+	for k, want := range map[string]string{"SP": "SP0;", "FR": "FR0;", "FT": "FT0;"} {
+		if got := cat.get(k); got != want {
+			t.Errorf("%s = %q during the session, want %q", k, got, want)
+		}
+	}
+	cat.mu.Lock()
+	cat.state["FB"] = "FB00007031000;" // as the paddle mode leaves it
+	cat.mu.Unlock()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{"SP": "SP1;", "FR": "FR0;", "FT": "FT1;", "FB": "FB00007030000;"} {
+		if got := cat.get(k); got != want {
+			t.Errorf("%s = %q after exit, want %q", k, got, want)
+		}
+	}
+	cat.mu.Lock()
+	defer cat.mu.Unlock()
+	fb, sp := -1, -1
+	for i, c := range cat.log {
+		switch {
+		case c == "FB00007030000;":
+			fb = i
+		case strings.HasPrefix(c, "SP") && c != "SP;":
+			sp = i
+		}
+	}
+	if fb < 0 || fb > sp {
+		t.Errorf("FB restored after split (log %v)", cat.log)
 	}
 }
 

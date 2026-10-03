@@ -75,7 +75,7 @@ Items marked [field] come from third-party code; [UNVERIFIED] = not confirmed.
 | RX | – | `RX;` | receive now (= TQ0) | early | hard key-up if TA0 not sent first |
 | SA | `SA;` | – | AGC attenuation dB | 1_02_000 | |
 | SM | `SM;` | – | S-meter in dB | 1_02_000 | format not detailed [UNVERIFIED] |
-| SP | `SP;` | `SPn;` | split off/on | early | |
+| SP | `SP;` | `SPn;` | split off/on. On 1_04_004 `SP0;` leaves the VFO mode on Split (LCD shows A/B) and the QMX then ignores `FB` writes: write FB first, then `SP0;FR0;FT0;` [field, SteffenLav `cat.c`] | early | |
 | SR | `SR;` | `SRn;` | Get SWR protection latch 0/1; Set (any n) resets | 1_04_004 | |
 | SS | `SS;` | `SSn;` | SSB TX source 0 USB audio, 1 two-tone, 2 ext mic | 1_02_000 | "Auto" only via menu |
 | SW | `SW;` | – | SWR ×100 (`SW121;`) during TX; `SW;` in RX | 1_02_000 | |
