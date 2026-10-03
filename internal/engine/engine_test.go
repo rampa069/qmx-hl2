@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,7 +92,8 @@ type fakeCapture struct {
 	frames int
 	toneHz float64
 	n      int
-	speed  float64 // >1 delivers frames faster than real time (0 = 1)
+	speed  float64     // >1 delivers frames faster than real time (0 = 1)
+	mono   atomic.Bool // the same signal on both channels, as the QMX sends without IQ mode
 }
 
 func (c *fakeCapture) FramesPerBuffer() int { return c.frames }
@@ -106,6 +108,9 @@ func (c *fakeCapture) Read(dst []float32) (int, error) {
 		ph := 2 * math.Pi * c.toneHz * float64(c.n) / 48000
 		dst[2*i] = float32(0.5 * math.Cos(ph))
 		dst[2*i+1] = float32(0.5 * math.Sin(ph))
+		if c.mono.Load() {
+			dst[2*i+1] = dst[2*i]
+		}
 		c.n++
 	}
 	return c.frames, nil
@@ -351,6 +356,56 @@ func TestEngineRetriesIQMode(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A stream that stops being I/Q while Q9 still reads 1 (after a visit to the QMX's menus) is
+// muted and IQ mode is set again without waiting for the 5 s check.
+func TestEngineDetectsLostIQMode(t *testing.T) {
+	cat := newFakeCAT()
+	capt := &fakeCapture{frames: 240, toneHz: 3000}
+	out := &capSender{}
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, capt, out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{7030000, 0x04})) // RX1; 48 kHz, 1 RX
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	waitFor(t, func() bool { return cat.get("FA") == "FA00007042000;" }, "tune")
+	q91 := func() int {
+		cat.mu.Lock()
+		defer cat.mu.Unlock()
+		n := 0
+		for _, c := range cat.log {
+			if c == "Q91;" {
+				n++
+			}
+		}
+		return n
+	}
+	before := q91()
+	capt.mono.Store(true)
+	waitFor(t, func() bool { return q91() > before }, "Q91; re-sent")
+	time.Sleep(300 * time.Millisecond) // under -race the DSP lags behind the capture
+	out.take()
+	time.Sleep(200 * time.Millisecond)
+	if a := toneAt(decode(out.take(), 1, 0), -3000, 48000); a > 0.01 {
+		t.Errorf("receive not muted while the stream is not I/Q: tone %g", a)
+	}
+	capt.mono.Store(false)
+	time.Sleep(300 * time.Millisecond)
+	out.take()
+	time.Sleep(200 * time.Millisecond)
+	if a := toneAt(decode(out.take(), 1, 0), -3000, 48000); a < 0.3 {
+		t.Errorf("receive still muted after the stream is I/Q again: tone %g", a)
 	}
 }
 

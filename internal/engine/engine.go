@@ -101,6 +101,7 @@ type Engine struct {
 	txSWR     float64
 
 	tune     chan struct{}
+	iqLost   chan struct{} // the capture is not I/Q: re-enable IQ mode now
 	playback audio.PlaybackStream
 
 	presaved map[string]string // original QMX state from an earlier connection
@@ -126,12 +127,13 @@ type Engine struct {
 // New creates an engine. The capture stream must be open and delivering stereo IQ.
 func New(cfg Config, cat *qmx.Client, capt audio.CaptureStream, out Sender) *Engine {
 	e := &Engine{
-		cfg:   cfg,
-		cat:   cat,
-		capt:  capt,
-		out:   out,
-		state: hpsdr.DefaultRadioState(),
-		tune:  make(chan struct{}, 1),
+		cfg:    cfg,
+		cat:    cat,
+		capt:   capt,
+		out:    out,
+		state:  hpsdr.DefaultRadioState(),
+		tune:   make(chan struct{}, 1),
+		iqLost: make(chan struct{}, 1),
 	}
 	if cfg.TX.Enabled {
 		e.tx = newTransmitter(cfg.TX, cat, e.setTXActive)
@@ -483,6 +485,49 @@ func (e *Engine) ensureVFOA(ctx context.Context) error {
 	return nil
 }
 
+// checkIQ takes the I/Q correlation of one capture block (see dsp.IQCorrelation). When the
+// capture has not been I/Q for notIQBlocks blocks it keeps receive muted and, at most every
+// 2 s, asks the CAT loop to re-enable IQ mode; it then returns true (the I/Q balance learnt
+// from the bad stream should be dropped).
+func (e *Engine) checkIQ(r float64, notIQ *int, lastLost *time.Time) bool {
+	const notIQBlocks, threshold = 3, 0.8
+	now := time.Now()
+	e.mu.Lock()
+	// While transmitting, and just after, the capture is junk that may be correlated.
+	if e.txActive || e.paddleTX || now.Sub(e.txEndedAt) < time.Second {
+		e.mu.Unlock()
+		*notIQ = 0
+		return false
+	}
+	if r < threshold {
+		e.mu.Unlock()
+		if *notIQ >= notIQBlocks {
+			slog.Info("QMX stream is I/Q again")
+		}
+		*notIQ = 0
+		return false
+	}
+	*notIQ++
+	if *notIQ < notIQBlocks {
+		e.mu.Unlock()
+		return false
+	}
+	if mu := now.Add(300 * time.Millisecond); mu.After(e.muteUntil) { // until the next blocks
+		e.muteUntil = mu
+	}
+	e.mu.Unlock()
+	if now.Sub(*lastLost) < 2*time.Second {
+		return false
+	}
+	*lastLost = now
+	slog.Warn("QMX stream is not I/Q (IQ mode lost?): receive muted, re-enabling IQ mode", "iq_correlation", math.Round(r*100)/100)
+	select {
+	case e.iqLost <- struct{}{}:
+	default:
+	}
+	return true
+}
+
 // catLoop owns the serial port after setup: it retunes on request and re-asserts IQ mode.
 func (e *Engine) catLoop(ctx context.Context) {
 	check := time.NewTicker(5 * time.Second)
@@ -501,6 +546,25 @@ func (e *Engine) catLoop(ctx context.Context) {
 				continue
 			}
 			// One try: the check repeats in 5 s, and retries here would hold up retuning.
+			if err := e.ensureIQMode(ctx, 1); err != nil {
+				slog.Warn("IQ mode check failed", "err", err)
+			}
+		case <-e.iqLost:
+			e.mu.Lock()
+			busy := e.txActive || e.paddleTX
+			e.mu.Unlock()
+			if busy {
+				continue
+			}
+			// Q9 may still read 1 while the stream is not I/Q, so set it before checking.
+			if err := e.cat.SetIQMode(true); err != nil {
+				slog.Warn("IQ mode re-enable failed", "err", err)
+				continue
+			}
+			e.mu.Lock()
+			e.muteUntil = time.Now().Add(e.cfg.IQSettle)
+			e.mu.Unlock()
+			time.Sleep(150 * time.Millisecond)
 			if err := e.ensureIQMode(ctx, 1); err != nil {
 				slog.Warn("IQ mode check failed", "err", err)
 			}
@@ -684,9 +748,15 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 		sendErr int
 		xs      = make([]complex128, e.capt.FramesPerBuffer())
 		iqbal   = dsp.NewIQBalancer(float64(e.cfg.SampleRate), 2)
-		floor   = newFloorTracker(400) // ~2 s of 5 ms buffers
-		rng     = rand.New(rand.NewPCG(1, 2))
-		lastBal time.Time
+		// After a visit to the QMX's menus its stream can carry demodulated audio (the same on
+		// both channels) instead of I/Q, while Q9 is only polled every 5 s. Three 100 ms
+		// blocks with I and Q correlated mute receive and re-enable IQ mode at once.
+		iqcorr   = dsp.NewIQCorrelation(float64(e.cfg.SampleRate), e.cfg.SampleRate/10)
+		notIQ    int
+		lastLost time.Time
+		floor    = newFloorTracker(400) // ~2 s of 5 ms buffers
+		rng      = rand.New(rand.NewPCG(1, 2))
+		lastBal  time.Time
 	)
 	var (
 		rateT0           = time.Now()
@@ -739,6 +809,9 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 			x := complex(li*gain, ri*gain)
 			if math.Abs(real(x)) > 0.99 || math.Abs(imag(x)) > 0.99 {
 				overload = true
+			}
+			if r, ok := iqcorr.Add(x); ok && e.checkIQ(r, &notIQ, &lastLost) {
+				iqbal = dsp.NewIQBalancer(float64(e.cfg.SampleRate), 2)
 			}
 			if useDC {
 				x = dc.Process(x)
