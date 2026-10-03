@@ -414,7 +414,7 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {
 		return nil, err
 	}
-	if err := e.ensureIQMode(ctx); err != nil {
+	if err := e.ensureIQMode(ctx, 4); err != nil {
 		return nil, err
 	}
 	return func() {
@@ -430,25 +430,36 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 	}, nil
 }
 
-// ensureIQMode sets Q91 and verifies it; Q9 is volatile on the QMX (doc/qmx/iq-mode.md).
-func (e *Engine) ensureIQMode(ctx context.Context) error {
-	on, err := e.cat.IQMode(ctx)
-	if err == nil && on {
-		return nil
+// ensureIQMode sets Q91 and verifies it, trying up to tries times: Q9 is volatile on the QMX,
+// and the first handshake after it connects can go unanswered (doc/qmx/iq-mode.md).
+func (e *Engine) ensureIQMode(ctx context.Context, tries int) error {
+	var on bool
+	var err error
+	for try := 1; try <= tries; try++ {
+		if try > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		if on, err = e.cat.IQMode(ctx); err == nil && on {
+			return nil
+		}
+		if err = e.cat.SetIQMode(true); err != nil {
+			continue
+		}
+		e.mu.Lock()
+		e.muteUntil = time.Now().Add(e.cfg.IQSettle)
+		e.mu.Unlock()
+		time.Sleep(150 * time.Millisecond)
+		if on, err = e.cat.IQMode(ctx); err == nil && on {
+			slog.Info("QMX IQ mode enabled", "try", try)
+			return nil
+		}
+		slog.Debug("QMX IQ mode not confirmed", "try", try, "on", on, "err", err)
 	}
-	if err := e.cat.SetIQMode(true); err != nil {
-		return err
-	}
-	e.mu.Lock()
-	e.muteUntil = time.Now().Add(e.cfg.IQSettle)
-	e.mu.Unlock()
-	time.Sleep(150 * time.Millisecond)
-	on, err = e.cat.IQMode(ctx)
-	if err != nil || !on {
-		return fmt.Errorf("QMX did not enter IQ mode (on=%v, err %v)", on, err)
-	}
-	slog.Info("QMX IQ mode enabled")
-	return nil
+	return fmt.Errorf("QMX did not enter IQ mode after %d tries (on=%v, err %v)", tries, on, err)
 }
 
 // ensureVFOA makes the QMX receive on VFO A, verifying it, if it was left on VFO B or split.
@@ -489,7 +500,8 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if busy {
 				continue
 			}
-			if err := e.ensureIQMode(ctx); err != nil {
+			// One try: the check repeats in 5 s, and retries here would hold up retuning.
+			if err := e.ensureIQMode(ctx, 1); err != nil {
 				slog.Warn("IQ mode check failed", "err", err)
 			}
 		case <-e.tune:

@@ -24,6 +24,7 @@ type fakeCAT struct {
 	state   map[string]string
 	pending string
 	log     []string
+	ignore  map[string]int // set commands the radio ignores, and how many times
 }
 
 func newFakeCAT() *fakeCAT {
@@ -56,6 +57,8 @@ func (f *fakeCAT) Write(p []byte) (int, error) {
 		}
 		if cmd == key+";" {
 			f.pending += f.state[key]
+		} else if f.ignore[cmd] > 0 {
+			f.ignore[cmd]--
 		} else {
 			f.state[key] = cmd
 		}
@@ -325,6 +328,29 @@ func TestEngineLeavesAndRestoresSplit(t *testing.T) {
 	}
 	if fb < 0 || fb > sp {
 		t.Errorf("FB restored after split (log %v)", cat.log)
+	}
+}
+
+// The first Q91; after the QMX connects can be lost: setup tries again.
+func TestEngineRetriesIQMode(t *testing.T) {
+	cat := newFakeCAT()
+	cat.ignore = map[string]int{"Q91;": 2}
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, &fakeCapture{frames: 240}, &capSender{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+
+	waitFor(t, func() bool { return cat.get("Q9") == "Q91;" }, "IQ mode on the third try")
+	time.Sleep(300 * time.Millisecond) // let the setup confirm it
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
