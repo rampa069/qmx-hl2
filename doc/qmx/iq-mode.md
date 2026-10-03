@@ -10,8 +10,14 @@ Legend: **[doc]** QRP Labs documentation; **[field]** third-party code / forum; 
 - Takes effect immediately, no reboot (Hans Summers + N6HAN, groups.io #126980/#127004, Aug 2024).
 - **Q9 is fragile session state** [field, SteffenLav/qmx-panadapter `cat.c`]:
   - `MU;` (config reload) drops IQ mode -> re-send `Q91;` after any `MU;` or MM write with
-    "MM effect = Immediate".
-  - Entering/leaving the radio's own menu (front panel or terminal) can drop it.
+    "MM effect = Immediate". (Later measurement on 1_04_004: only `MU;` drops Q9, an MM write
+    with Immediate effect does not; re-asserting anyway is harmless.)
+  - Entering/leaving the radio's own menu (front panel or terminal) can drop it. Then the
+    stream keeps running (~47k frames/s) but carries **demodulated audio instead of I/Q**:
+    every signal gets a mirror twin. A dead-stream watchdog does not catch it.
+  - On a QMX+, CAT traffic while the user is in the front-panel *Band config* menu can trigger
+    a watchdog reboot: USB stays enumerated and CAT answers, but all session state is gone.
+  - The first `Q9` handshake is often unanswered; retry (they use 4 tries, 300 ms apart).
   - QMX power cycle clears it (USB audio may survive the restart, so the host doesn't notice).
   - One user's 1_04 unit silently ignored `Q9 1;`. Always read back with `Q9;` and verify.
   - Reported asynchronous echo of set commands (`Q91;` coming back) — conflicts with SDR++-iak
@@ -23,7 +29,7 @@ Legend: **[doc]** QRP Labs documentation; **[field]** third-party code / forum; 
 | Property | Value | Source |
 |---|---|---|
 | Transport | Same USB Audio device used for normal demodulated audio; in IQ mode it carries raw ADC samples instead | [doc] CAT manual Q9, op manual p.71 |
-| Rate | 48 000 samples/s complex | [doc] PCM1804 @ 48 ksps |
+| Rate | 48 000 samples/s complex nominal; one unit measured at 47 885/s (-0.24 %) | [doc] PCM1804 @ 48 ksps; [field] SteffenLav `rx_audio.c` |
 | Format | signed 24-bit, packed little-endian (S24_3LE), stereo, 6 bytes/frame | [field] SDR++-iak, SteffenLav |
 | Channel order | **Left = I, Right = Q**; complex sample = L + jR gives correct (non-inverted) spectrum | [field] SteffenLav `rx_audio.c` NCO mix `(I + jQ)`, SDR++-iak `push(L, R)`; lloydm.net ("left and right stereo channels") |
 | Packetisation | 1 ms iso packets of 48 frames (288 bytes) | [field] OK1IAK #165551 |
@@ -76,6 +82,14 @@ mode for RX (extra offset) or compensate. Split (`SP1;` / FR/FT) lets TX VFO dif
   away and filtered]. The image of a signal at +f appears at −f around the LO.
 - Host should implement adaptive IQ balance (SteffenLav implements `iq_balance.c`).
 - 160 m quadrature was broken on QMX+ until 1_04_007.
+
+## Synthesiser spurs
+
+- The QMX puts its own spur comb into the I/Q stream: ~8015.6 Hz spacing, moving 16-50x as
+  fast as the dial, strong only in a few dial windows per 100 kHz (14.074 MHz is one). Measured
+  +38.6 dB above the floor with the BNC open, ~22.7 dB with an antenna; the floor there was
+  5-6 dB worse than 6 kHz away [field, SteffenLav `spur_map.c`, `TODO.md` #168,
+  `docs/version-history.md`]. Moving the LO a little (`-looffset`) may push it off a signal.
 
 ## TX while in IQ mode
 

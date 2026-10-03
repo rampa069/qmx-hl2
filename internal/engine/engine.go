@@ -385,6 +385,16 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 			slog.Warn("TX ENABLED: the QMX will transmit when the client keys MOX")
 		}
 	}
+	// FA tunes VFO A only: a QMX left receiving on VFO B would not follow the client.
+	if r, err := e.readOrig(ctx, "FR"); err == nil {
+		orig["FR"] = r
+		keys = append(keys, "FR") // last, so that FA and FB are restored before it
+	} else {
+		slog.Debug("QMX setting not saved", "cmd", "FR", "err", err)
+	}
+	if err := e.ensureVFOA(ctx); err != nil {
+		return nil, err
+	}
 	// Digi mode puts the LO exactly IFOffset below the dial (CW mode adds its own offset).
 	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {
 		return nil, err
@@ -423,6 +433,27 @@ func (e *Engine) ensureIQMode(ctx context.Context) error {
 		return fmt.Errorf("QMX did not enter IQ mode (on=%v, err %v)", on, err)
 	}
 	slog.Info("QMX IQ mode enabled")
+	return nil
+}
+
+// ensureVFOA makes the QMX receive on VFO A, verifying it, if it was left on VFO B or split.
+func (e *Engine) ensureVFOA(ctx context.Context) error {
+	vfo, err := e.cat.RXVFO(ctx)
+	if err != nil {
+		slog.Warn("QMX receive VFO not read; assuming VFO A", "err", err)
+		return nil
+	}
+	if vfo == 0 {
+		return nil
+	}
+	slog.Warn("QMX was receiving on VFO B or split; switching to VFO A", "fr", vfo)
+	if err := e.cat.SetVFOA(); err != nil {
+		return err
+	}
+	time.Sleep(60 * time.Millisecond)
+	if vfo, err = e.cat.RXVFO(ctx); err != nil || vfo != 0 {
+		return fmt.Errorf("QMX did not switch to VFO A (FR %d, err %v)", vfo, err)
+	}
 	return nil
 }
 

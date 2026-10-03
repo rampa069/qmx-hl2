@@ -34,7 +34,7 @@ Items marked [field] come from third-party code; [UNVERIFIED] = not confirmed.
 | C2 | `C2;` | `C2<Hz>;` | Si5351 Clk2 signal generator frequency | early | test use |
 | FA | `FA;` | `FA<Hz>;` | reply 11 digits `FA00007030000;` | early | VFO A |
 | FB | `FB;` | `FB<Hz>;` | 11 digits (manual example shows `FA` prefix in reply — typo?) | early | VFO B |
-| FR | `FR;` | `FRn;` | Set: 0=VFO A,1=VFO B,2=Split. Get: 0 = A used for RX, 1 = B | early | not exactly TS-480 |
+| FR | `FR;` | `FRn;` | Set: 0=VFO A,1=VFO B,2=Split. Get: 0 = A used for RX, 1 = B (SteffenLav also handles 2 = Split). A radio left on VFO B ignores `FA` for receive [field, SteffenLav `cat.c`]; the daemon forces `FR0;` at startup | early | not exactly TS-480 |
 | FT | `FT;` | `FTn;` | Set as FR. Get: 0 = A used for TX, 1 = B used for TX | early | |
 | FW | `FW;` | – | 3200 in Digi, 0300 in CW (actual CW BW since 1_02_001) | early | read-only |
 | GP | `GP;` | – | `GP+DD.DDDDDD+DDD.DDDDDD+YYYYMMDDHHMMSS;` | 1_04_004 | lon sign fixed 1_04_005 |

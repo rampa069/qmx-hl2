@@ -28,7 +28,7 @@ type fakeCAT struct {
 
 func newFakeCAT() *fakeCAT {
 	return &fakeCAT{state: map[string]string{"FA": "FA00024915000;", "MD": "MD3;", "Q9": "Q90;", "TQ": "TQ0;",
-		"SP": "SP0;", "FB": "FB00007030000;", "KS": "KS18;"}}
+		"SP": "SP0;", "FB": "FB00007030000;", "KS": "KS18;", "FR": "FR0;"}}
 }
 
 func (f *fakeCAT) Write(p []byte) (int, error) {
@@ -245,6 +245,33 @@ func TestEngineStreamsShiftedReceivers(t *testing.T) {
 		if strings.HasPrefix(c, "TX") || strings.HasPrefix(c, "TQ1") || strings.HasPrefix(c, "TA") {
 			t.Errorf("engine sent %q", c)
 		}
+	}
+}
+
+func TestEngineSwitchesToVFOA(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["FR"] = "FR1;" // left receiving on VFO B
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, &fakeCapture{frames: 240}, &capSender{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+
+	waitFor(t, func() bool { return e.SavedState() != nil }, "setup")
+	if got := cat.get("FR"); got != "FR0;" {
+		t.Errorf("FR = %q during the session, want FR0;", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := cat.get("FR"); got != "FR1;" {
+		t.Errorf("FR = %q after exit, want FR1; restored", got)
 	}
 }
 

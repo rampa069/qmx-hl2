@@ -243,6 +243,16 @@ func (c *Client) SetSplit(on bool) error {
 	return c.Set("SP0;")
 }
 
+// RXVFO reports which VFO the QMX receives on: 0 for VFO A, 1 for VFO B (some firmware also
+// answers 2 for split).
+func (c *Client) RXVFO(ctx context.Context) (int, error) {
+	v, err := c.QueryInt(ctx, "FR;")
+	return int(v), err
+}
+
+// SetVFOA makes the QMX receive and transmit on VFO A (FR0;), the VFO that FA tunes.
+func (c *Client) SetVFOA() error { return c.Set("FR0;") }
+
 // SetKeyerSpeed sets the keyer speed in WPM (session only, not saved to EEPROM).
 func (c *Client) SetKeyerSpeed(wpm int) error { return c.Set(fmt.Sprintf("KS%02d;", wpm)) }
 

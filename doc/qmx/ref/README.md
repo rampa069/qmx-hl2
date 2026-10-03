@@ -21,7 +21,9 @@ Other sources consulted (not downloaded):
 - SDR++ fork with QMX source (libqmx; Linux/macOS/Windows/Android backends):
   https://github.com/bubnikv/SDRPlusPlus-iak (source_modules/qmx_source, SYNCHRONIZATION.md)
 - Tab5 QMX panadapter (IQ decode, CAT handshakes, TX via TA): https://github.com/SteffenLav/qmx-panadapter ,
-  derivative with OpenHPSDR backend: https://github.com/pd4hs/qmx-panadapter
+  fork https://github.com/pd4hs/qmx-panadapter (a mirror of upstream plus a plan, not code, for a
+  radio abstraction layer so the Tab5 app could drive other radios; no OpenHPSDR emulation,
+  checked 2026-10-04)
 - SDR++ issue "Possible QMX+ source": https://github.com/AlexandreRouma/SDRPlusPlus/issues/1734
 - https://www.lloydm.net/Demos/QMX_Interface.html
 - Hamlib riglist.h / rigs/kenwood/ts480.c (model 2057 QRPLABS_QMX)
