@@ -863,9 +863,15 @@ func (e *Engine) captureLoop(ctx context.Context) error {
 			r := float64(rateFrames) / el
 			slog.Debug("packet rates", "qmx_frames_s", math.Round(r),
 				"ep6_s", math.Round(float64(e6-rateEP6)/el*10)/10, "ep2_s", math.Round(float64(e2-rateEP2)/el*10)/10)
-			// Only trust windows spent entirely in receive, and only plausible values.
-			if !rateWasTX && math.Abs(r/float64(e.cfg.SampleRate)-1) < 0.002 {
-				rxRate = r
+			// Only trust windows spent entirely in receive, and only plausible values: QMX
+			// units differ (one measured at 47885/s, -0.24%), while playing USB audio makes
+			// the capture run about 1.1% fast.
+			if !rateWasTX {
+				if math.Abs(r/float64(e.cfg.SampleRate)-1) < 0.005 {
+					rxRate = r
+				} else {
+					slog.Warn("QMX capture rate implausible; not used for EP6 pacing", "qmx_frames_s", math.Round(r))
+				}
 			}
 			rateT0, rateEP2, rateEP6, rateFrames = time.Now(), e2, e6, 0
 			rateWasTX = false
