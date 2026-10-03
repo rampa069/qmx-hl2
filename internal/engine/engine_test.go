@@ -409,6 +409,48 @@ func TestEngineDetectsLostIQMode(t *testing.T) {
 	}
 }
 
+// A QMX that restarted (its watchdog, during a front-panel menu) has lost the whole session,
+// not just IQ mode: all of it is set up again, and the dial retuned.
+func TestEngineReappliesSessionAfterRestart(t *testing.T) {
+	cat := newFakeCAT()
+	cat.state["QB"], cat.state["QC"] = "QB0;", "QC0;"
+	capt := &fakeCapture{frames: 240, toneHz: 3000}
+	cfg := DefaultConfig()
+	cfg.IQSettle = 0
+	cfg.TX.Enabled = true
+	client := qmx.NewClient(cat)
+	catCtx, catCancel := context.WithCancel(context.Background())
+	defer catCancel()
+	go client.Run(catCtx)
+	e := New(cfg, client, capt, &capSender{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- e.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	e.EP2(ep2([2]byte{0x02 << 1, 0x00}, [2]uint32{7030000, 0x04})) // RX1; 48 kHz, 1 RX
+	e.Started(netip.MustParseAddrPort("192.0.2.1:50000"), hpsdr.StartStop{IQ: true})
+	waitFor(t, func() bool { return cat.get("FA") == "FA00007042000;" }, "tune")
+
+	// The QMX restarts: back to its own settings, and its stream is no longer I/Q.
+	cat.mu.Lock()
+	for k, v := range map[string]string{"FA": "FA00001840000;", "MD": "MD3;", "Q9": "Q90;",
+		"QB": "QB0;", "QC": "QC0;", "SP": "SP1;", "FR": "FR1;", "FT": "FT1;"} {
+		cat.state[k] = v
+	}
+	cat.mu.Unlock()
+	capt.mono.Store(true)
+	waitFor(t, func() bool { return cat.get("Q9") == "Q91;" }, "IQ mode again")
+	capt.mono.Store(false)
+	waitFor(t, func() bool { return cat.get("FA") == "FA00007042000;" }, "retune")
+	for k, want := range map[string]string{"MD": "MD6;", "QB": "QB1;", "QC": "QC3;",
+		"SP": "SP0;", "FR": "FR0;", "FT": "FT0;"} {
+		if got := cat.get(k); got != want {
+			t.Errorf("%s = %q after the restart, want %q", k, got, want)
+		}
+	}
+}
+
 func TestEngineAck(t *testing.T) {
 	e := New(DefaultConfig(), qmx.NewClient(newFakeCAT()), &fakeCapture{frames: 240}, &capSender{})
 	e.EP2(ep2([2]byte{0x80 | 0x3a<<1, 0}, [2]uint32{0x1, 0}))

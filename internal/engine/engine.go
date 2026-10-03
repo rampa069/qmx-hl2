@@ -354,9 +354,6 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 			}
 			orig["SS"] = r
 			keys = append(keys, "SS")
-			if err := e.cat.Set("SS0;"); err != nil { // SSB audio from USB
-				return nil, err
-			}
 		}
 		// VFO B and keyer speed change while the QMX is keyed by its paddles (see paddleMode).
 		// Their original values are restored on exit when they can be read; the manual shows
@@ -376,10 +373,6 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 			e.cwOffset = off
 		} else {
 			slog.Debug("QMX CW offset not read; assuming 700 Hz", "err", err)
-		}
-		// If the daemon dies mid-transmission, the QMX drops TX after 3 s without CAT.
-		if err := e.cat.SetCATTimeout(true, 3); err != nil {
-			return nil, err
 		}
 		e.cat.AllowTX(true)
 		if e.cfg.TX.Virtual {
@@ -404,19 +397,7 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 		orig[c] = r
 		keys = append(keys, c)
 	}
-	if e.tx != nil {
-		if err := e.cat.SetSplit(false); err != nil {
-			return nil, err
-		}
-	}
-	if err := e.ensureVFOA(ctx); err != nil {
-		return nil, err
-	}
-	// Digi mode puts the LO exactly IFOffset below the dial (CW mode adds its own offset).
-	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {
-		return nil, err
-	}
-	if err := e.ensureIQMode(ctx, 4); err != nil {
+	if err := e.applySession(ctx, 4); err != nil {
 		return nil, err
 	}
 	return func() {
@@ -430,6 +411,51 @@ func (e *Engine) setupRadio(ctx context.Context) (restore func(), err error) {
 		}
 		slog.Info("QMX state restored")
 	}, nil
+}
+
+// applySession puts the QMX in this daemon's session state: SSB audio from USB, the CAT
+// watchdog and no split when transmitting, VFO A, Digi mode and IQ mode (tried iqTries times).
+// The QMX keeps none of it across a restart.
+func (e *Engine) applySession(ctx context.Context, iqTries int) error {
+	if e.tx != nil {
+		if e.tx.ssb != nil {
+			if err := e.cat.Set("SS0;"); err != nil { // SSB audio from USB
+				return err
+			}
+		}
+		// If the daemon dies mid-transmission, the QMX drops TX after 3 s without CAT.
+		if err := e.cat.SetCATTimeout(true, 3); err != nil {
+			return err
+		}
+		if err := e.cat.SetSplit(false); err != nil {
+			return err
+		}
+	}
+	if err := e.ensureVFOA(ctx); err != nil {
+		return err
+	}
+	// Digi mode puts the LO exactly IFOffset below the dial (CW mode adds its own offset).
+	if err := e.cat.SetMode(qmx.ModeDigi); err != nil {
+		return err
+	}
+	return e.ensureIQMode(ctx, iqTries)
+}
+
+// reapplySession sets the session up again after the QMX was found with IQ mode off: a visit
+// to its menus drops IQ mode, and on a QMX+ CAT traffic during the Band config menu can restart
+// the radio, which loses everything else too (doc/qmx/iq-mode.md). The dial and the paddle
+// setup are then applied again by a forced retune.
+func (e *Engine) reapplySession(ctx context.Context) {
+	slog.Warn("QMX IQ mode was off (radio menu or restart?): setting the session up again")
+	if err := e.applySession(ctx, 1); err != nil {
+		slog.Warn("QMX session setup failed", "err", err)
+	}
+	e.mu.Lock()
+	e.paddleMode = false // applySession left the QMX in Digi without split
+	e.lastFB, e.lastKS = 0, 0
+	e.forceTune = true
+	e.mu.Unlock()
+	e.requestTune()
 }
 
 // ensureIQMode sets Q91 and verifies it, trying up to tries times: Q9 is volatile on the QMX,
@@ -545,15 +571,20 @@ func (e *Engine) catLoop(ctx context.Context) {
 			if busy {
 				continue
 			}
-			// One try: the check repeats in 5 s, and retries here would hold up retuning.
-			if err := e.ensureIQMode(ctx, 1); err != nil {
+			if on, err := e.cat.IQMode(ctx); err != nil {
 				slog.Warn("IQ mode check failed", "err", err)
+			} else if !on {
+				e.reapplySession(ctx)
 			}
 		case <-e.iqLost:
 			e.mu.Lock()
 			busy := e.txActive || e.paddleTX
 			e.mu.Unlock()
 			if busy {
+				continue
+			}
+			if on, err := e.cat.IQMode(ctx); err == nil && !on {
+				e.reapplySession(ctx)
 				continue
 			}
 			// Q9 may still read 1 while the stream is not I/Q, so set it before checking.
